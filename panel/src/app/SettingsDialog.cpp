@@ -320,8 +320,8 @@ void SettingsDialog::buildUi() {
     transcriptReset_->setRange(0, 300);
     transcriptReset_->setSuffix(tr(" s"));
     transcriptReset_->setSpecialValueText(tr("Never"));
-    transcriptReset_->setToolTip(tr("After this much silence, a completed quick document is saved before the panes reset. "
-                                    "Pending work and review text stay available. Without storage, text is kept. "
+    transcriptReset_->setToolTip(tr("After this much silence, a completed quick transcript moves to History and the panes reset. "
+                                    "Pending processing finishes first. Auto-save uses the configured folder; insertion or save failures do not block recording. "
                                     "The microphone and the speech detector keep running."));
     vadForm->addRow(tr("Start a new transcript after silence"), transcriptReset_);
     minSpeechFrames_ = new QSpinBox;
@@ -552,7 +552,7 @@ void SettingsDialog::load() {
         ttsModel_->addItem(s->ttsModel, s->ttsModel);
     ttsModel_->setCurrentIndex(qMax(0, ttsModel_->findData(s->ttsModel)));
     vadModel_->setText(s->vadModel);
-    markdownDir_->setText(s->markdownDir);
+    markdownDir_->setText(s->transcriptDirectory());
     autoSave_->setChecked(s->autoSaveSessions);
     audioRetention_->setValue(s->audioRetentionDays);
     refreshVoices();

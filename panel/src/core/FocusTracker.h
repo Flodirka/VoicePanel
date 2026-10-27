@@ -17,6 +17,7 @@ struct FocusTarget {
 // Snapshot of the currently focused editable element (or focused window when
 // the element is not exposed). Call when dictation begins.
 FocusTarget captureCurrentFocus();
+FocusTarget retainFocusTarget(const FocusTarget &target);
 void releaseFocusTarget(FocusTarget &target);
 
 } // namespace VoicePanel

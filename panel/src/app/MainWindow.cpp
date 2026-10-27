@@ -113,6 +113,7 @@ MainWindow::~MainWindow() {
     app_->dictation()->cancel();
     app_->processor()->reset();
     releaseFocusTarget(target_);
+    for (auto &transcript : preservedTranscripts_) releaseFocusTarget(transcript.target);
 }
 
 void MainWindow::buildUi() {
@@ -296,9 +297,11 @@ void MainWindow::buildUi() {
     linkScroll(resultEdit_->verticalScrollBar(), originalEdit_->verticalScrollBar());
     connect(resultEdit_, &QTextEdit::textChanged, this, [this]() {
         userEditedResult_ = true;
+        reviewedConfirmed_ = true;
         corrections_.clear();
         showCorrections();
         updateActions();
+        saveSessionRecord();
     });
     for (auto *edit : {originalEdit_, resultEdit_}) {
         edit->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -330,8 +333,10 @@ void MainWindow::buildUi() {
     rejectButton_->setObjectName("rejectCorrection");
     acceptButton_->setProperty("variant", "outline");
     rejectButton_->setProperty("variant", "ghost");
-    connect(acceptButton_, &QPushButton::clicked, this, [this]() { reviewCorrection(true); });
-    connect(rejectButton_, &QPushButton::clicked, this, [this]() { reviewCorrection(false); });
+    acceptButton_->setToolTip(tr("Accept all current corrections"));
+    rejectButton_->setToolTip(tr("Reject all current corrections"));
+    connect(acceptButton_, &QPushButton::clicked, this, [this]() { reviewCorrections(true); });
+    connect(rejectButton_, &QPushButton::clicked, this, [this]() { reviewCorrections(false); });
     review->addWidget(acceptButton_);
     review->addWidget(rejectButton_);
     editor->addWidget(reviewBar_);
@@ -347,6 +352,20 @@ void MainWindow::buildUi() {
     saveButton_->setIcon(UiKit::icon("folder"));
     connect(saveButton_, &QPushButton::clicked, this, &MainWindow::saveReviewedText);
     actions->addWidget(saveButton_);
+    historyButton_ = new QPushButton(tr("History"));
+    historyButton_->setObjectName("transcriptHistory");
+    historyButton_->setProperty("variant", "ghost");
+    historyButton_->setToolTip(tr("Restore a previous transcript, including text that could not be inserted or saved"));
+    connect(historyButton_, &QPushButton::clicked, this, [this]() {
+        QMenu menu(historyButton_);
+        for (int i = preservedTranscripts_.size() - 1; i >= 0; --i) {
+            const auto &record = preservedTranscripts_[i].record;
+            auto *action = menu.addAction(record.started.toString("HH:mm:ss") + " · " + record.original.left(48));
+            connect(action, &QAction::triggered, this, [this, i]() { restoreTranscript(i); });
+        }
+        menu.exec(historyButton_->mapToGlobal(QPoint(0, historyButton_->height())));
+    });
+    actions->addWidget(historyButton_);
     actions->addStretch();
     copyButton_ = new QPushButton(tr("Copy"));
     copyButton_->setProperty("variant", "outline");
@@ -376,17 +395,24 @@ void MainWindow::configureProcessing() {
 void MainWindow::startNewTranscript() {
     if (!recording_ || finishing_ || speechActive_) return;
     if (originalSoFar_.trimmed().isEmpty() && processedSoFar_.trimmed().isEmpty()) return;
-    // Review keeps the whole recording available for one confirmation. Quick
-    // documents can roll over only after every result is inserted and saved.
-    if (reviewMode_ || !app_->store()->enabled()) return;
+    // Review keeps the whole recording for confirmation. Quick capture must
+    // continue even when the destination or optional storage is unavailable.
+    if (reviewMode_) return;
     if (app_->dictation()->pending() || app_->processor()->busy() ||
-        !app_->processor()->pendingOriginal().isEmpty() || !previews_.isEmpty() ||
-        insertTimer_.isActive() || insertedText_ != resultEdit_->toPlainText() || insertionFailed_) {
+        !previews_.isEmpty() || insertTimer_.isActive()) {
         transcriptTimer_.start(250);
         return;
     }
-    if (!saveSessionRecord(true, true)) return;
+    if (!app_->processor()->pendingOriginal().isEmpty()) {
+        app_->processor()->finish();
+        if (app_->processor()->busy()) { transcriptTimer_.start(250); return; }
+        scheduleQuickInsert();
+        if (insertTimer_.isActive()) { transcriptTimer_.start(250); return; }
+    }
+    preserveTranscript();
+    app_->processor()->reset();
     insertedEarlierDocument_ |= !insertedText_.isEmpty();
+    insertionFailed_ = false;
     insertedText_.clear();
     finalFragment_.clear();
     sessionId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -402,6 +428,7 @@ void MainWindow::startNewTranscript() {
     corrections_.clear();
     currentCorrection_ = 0;
     userEditedResult_ = false;
+    reviewedConfirmed_ = false;
     updateOriginal();
     updateResult();
     statusLabel_->setText(tr("New transcript after %1 s of silence").arg(app_->settings()->transcriptResetS));
@@ -432,20 +459,18 @@ void MainWindow::toggleDictation(bool reviewMode) {
 
 void MainWindow::startDictation(bool reviewMode) {
     if (recording_ || finishing_) return;
-    if (insertionFailed_) {
-        processingLabel_->setText(tr("Insertion failed. Retry Insert or Copy the preserved text before starting again."));
-        showExpanded();
-        return;
-    }
+    preserveTranscript();
     ++generation_;
     releaseFocusTarget(target_);
     target_ = captureCurrentFocus();
-    if (target_.windowHandle == quintptr(winId())) releaseFocusTarget(target_);
+    if (target_.windowHandle == quintptr(winId()) || target_.windowHandle == quintptr(editorPage_->winId()))
+        releaseFocusTarget(target_);
     reviewMode_ = reviewMode;
     sessionId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
     sessionStartedAt_ = QDateTime::currentDateTime();
     sessionEndedAt_ = {};
     processingDone_ = false;
+    insertionFailed_ = speechActive_ = reviewedConfirmed_ = false;
     insertedEarlierDocument_ = false;
     insertedText_.clear();
     finalFragment_.clear();
@@ -478,7 +503,7 @@ void MainWindow::startDictation(bool reviewMode) {
     params.language = "auto";
     app_->dictation()->setParams(params);
     app_->dictation()->setInputDevice(settings->inputDevice);
-    if (!app_->dictation()->start()) return;
+    if (!app_->dictation()->start()) { updateActions(); return; }
     recording_ = sessionActive_ = true;
     statusLabel_->setText(tr("Listening…"));
     processingLabel_->setText(target_.isValid() ? tr("Target: %1").arg(target_.windowTitle)
@@ -521,6 +546,7 @@ void MainWindow::onFinalTranscript(const QString &text, qreal seconds, int id) {
     originalSoFar_ += (originalSoFar_.isEmpty() ? "" : " ") + text;
     updateOriginal();
     app_->processor()->acceptFinal(text);
+    saveSessionRecord();
 }
 
 void MainWindow::onProcessedBatch(const QString &original, const QString &result) {
@@ -528,6 +554,7 @@ void MainWindow::onProcessedBatch(const QString &original, const QString &result
     processedSoFar_ += (processedSoFar_.isEmpty() ? "" : " ") + result;
     updateResult();
     scheduleQuickInsert();
+    saveSessionRecord();
 }
 
 void MainWindow::updateResult() {
@@ -586,7 +613,18 @@ void MainWindow::showCorrections() {
     originalEdit_->setExtraSelections(originals);
     resultEdit_->setExtraSelections(results);
     reviewBar_->setVisible(!corrections_.isEmpty());
-    changeLabel_->setText(tr("Change %1 of %2 · click a highlight").arg(currentCorrection_ + 1).arg(corrections_.size()));
+    changeLabel_->setText(tr("%1 corrections · Accept or Reject all").arg(corrections_.size()));
+}
+
+void MainWindow::reviewCorrections(bool accept) {
+    if (finishing_) return;
+    const int count = corrections_.size();
+    for (int i = 0; i < count && !corrections_.isEmpty(); ++i) {
+        // Reject from the end so earlier offsets stay valid in restored text.
+        currentCorrection_ = accept ? 0 : qMin(count - i - 1, int(corrections_.size()) - 1);
+        reviewCorrection(accept);
+    }
+    saveSessionRecord(true);
 }
 
 void MainWindow::reviewCorrection(bool accept) {
@@ -605,7 +643,7 @@ void MainWindow::reviewCorrection(bool accept) {
     }
     // Reject rewrites the corrected wording inside the processed text, so the
     // decision survives the next batch instead of freezing the whole pane.
-    if (change.resultStart >= 0 && change.resultStart + change.resultLength <= processedSoFar_.size()) {
+    if (!userEditedResult_ && change.resultStart >= 0 && change.resultStart + change.resultLength <= processedSoFar_.size()) {
         processedSoFar_.replace(change.resultStart, change.resultLength, originalText);
         updateResult();
         return;
@@ -674,6 +712,7 @@ void MainWindow::translateResult() {
             showCorrections();
         }
         updateActions();
+        saveSessionRecord();
     });
 }
 
@@ -687,6 +726,7 @@ void MainWindow::updateActions() {
     copyButton_->setEnabled(hasText);
     saveButton_->setEnabled(hasText && !recording_ && !finishing_);
     saveButton_->setToolTip(tr("Save reviewed text · %1").arg(app_->settings()->saveHotkey));
+    historyButton_->setEnabled(!preservedTranscripts_.isEmpty() && !recording_ && !finishing_ && !insertTimer_.isActive());
     insertButton_->setEnabled(hasText && target_.isValid() && !recording_ && !finishing_);
     translateButton_->setEnabled(hasText && !recording_ && !finishing_);
     // Decisions belong to completed corrections, not to the microphone: they
@@ -717,7 +757,7 @@ void MainWindow::finishSession() {
 }
 
 void MainWindow::scheduleQuickInsert() {
-    if (reviewMode_ || !sessionActive_ || userEditedResult_ || insertionFailed_ || insertTimer_.isActive()) return;
+    if (reviewMode_ || !sessionActive_ || !target_.isValid() || userEditedResult_ || insertionFailed_ || insertTimer_.isActive()) return;
     const QString ready = (processedSoFar_ + " " + finalFragment_).trimmed();
     if (ready != insertedText_ && !ready.isEmpty()) insertTimer_.start(0);
 }
@@ -741,25 +781,25 @@ void MainWindow::insertResult(bool automatic) {
         insertionFailed_ = false;
         processingLabel_->setText(tr("Inserted without submitting."));
         saveSessionRecord(true);
-        // Clipboard fallback restores after 250 ms. Serialize the next batch
+        // Clipboard fallback restores after one second. Serialize the next batch
         // and keep finalization guarded until that paste has been delivered.
-        if (automatic) insertTimer_.start(300);
+        if (automatic) insertTimer_.start(report.result == InsertResult::ClipboardFallback ? 1100 : 0);
     } else {
         insertionFailed_ = true;
-        processingLabel_->setText(tr("Insertion failed: %1. Use Copy.").arg(report.detail));
-        showExpanded();
+        processingLabel_->setText(tr("Text kept. Insertion unavailable: %1. Recording can continue.").arg(report.detail));
+        if (!automatic) showExpanded();
     }
 }
 
 void MainWindow::copyResult() {
     QApplication::clipboard()->setText(resultEdit_->toPlainText());
-    processingLabel_->setText(tr("Copied."));
-    insertionFailed_ = false;
+    processingLabel_->setText(QApplication::clipboard()->text() == resultEdit_->toPlainText()
+        ? tr("Copied.") : tr("Clipboard is unavailable. The text is kept for another attempt."));
 }
 
-bool MainWindow::saveSessionRecord(bool confirmed, bool force) {
-    auto *store = app_->store();
-    if (!store->enabled() || (!force && !app_->settings()->autoSaveSessions)) return false;
+SessionRecord MainWindow::sessionRecord(bool confirmed) {
+    if (sessionId_.isEmpty()) sessionId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!sessionStartedAt_.isValid()) sessionStartedAt_ = QDateTime::currentDateTime();
     SessionRecord record;
     record.sessionId = sessionId_;
     record.mode = app_->settings()->autoCleanEditor ? "auto_correct" : "dictation";
@@ -768,12 +808,63 @@ bool MainWindow::saveSessionRecord(bool confirmed, bool force) {
     record.corrected = processedSoFar_;
     record.translation = translation_;
     record.targetLang = translationLanguage_;
-    if (confirmed) record.finalText = resultEdit_->toPlainText();
+    if (confirmed || reviewedConfirmed_) record.finalText = resultEdit_->toPlainText();
     record.started = sessionStartedAt_;
     record.ended = sessionEndedAt_.isValid() ? sessionEndedAt_ : QDateTime::currentDateTime();
+    return record;
+}
+
+bool MainWindow::saveSessionRecord(bool confirmed, bool force) {
+    reviewedConfirmed_ |= confirmed;
+    auto *store = app_->store();
+    if (!store->enabled() || (!force && !app_->settings()->autoSaveSessions)) return false;
+    if (originalSoFar_.isEmpty() && resultEdit_->toPlainText().isEmpty()) return false;
+    const auto record = sessionRecord(confirmed);
     QString error;
     if (!store->saveRecord(record, &error)) { processingLabel_->setText(error); return false; }
     return true;
+}
+
+void MainWindow::preserveTranscript() {
+    if (originalSoFar_.isEmpty() && resultEdit_->toPlainText().isEmpty()) return;
+    saveSessionRecord();
+    preservedTranscripts_.append({sessionRecord(false), resultEdit_->toPlainText(), insertedText_,
+        retainFocusTarget(target_), acceptedChanges_, corrections_, insertionFailed_, reviewedConfirmed_});
+}
+
+void MainWindow::restoreTranscript(int index) {
+    if (recording_ || finishing_ || insertTimer_.isActive() || index < 0 || index >= preservedTranscripts_.size()) return;
+    const auto saved = preservedTranscripts_.takeAt(index);
+    preserveTranscript();
+    releaseFocusTarget(target_);
+    target_ = saved.target;
+    ++generation_;
+    transcriptTimer_.stop();
+    app_->processor()->reset();
+    sessionActive_ = false;
+    reviewMode_ = true;
+    sessionId_ = saved.record.sessionId;
+    sessionStartedAt_ = saved.record.started;
+    sessionEndedAt_ = saved.record.ended;
+    originalSoFar_ = saved.record.original;
+    processedSoFar_ = saved.record.corrected;
+    translation_ = saved.record.translation;
+    translationLanguage_ = saved.record.targetLang;
+    insertedText_ = saved.insertedText;
+    fragmentText_.clear();
+    finalFragment_.clear();
+    previews_.clear();
+    insertionFailed_ = saved.insertionFailed;
+    insertedEarlierDocument_ = false;
+    reviewedConfirmed_ = saved.confirmed;
+    acceptedChanges_ = saved.acceptedChanges;
+    corrections_ = saved.corrections;
+    userEditedResult_ = true;
+    { const QSignalBlocker blocker(resultEdit_); resultEdit_->setPlainText(saved.reviewedText); }
+    resultLabel_->setText(translation_.isEmpty() ? tr("Reviewed text") : tr("Translation · RU ↔ EN"));
+    updateOriginal();
+    updateActions();
+    showExpanded();
 }
 
 void MainWindow::saveReviewedText() {
@@ -955,7 +1046,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 
 bool MainWindow::nativeEvent(const QByteArray &type, void *message, qintptr *result) {
     const auto *msg = static_cast<MSG *>(message);
-    if (!expanded_ && type == "windows_generic_MSG" && msg->message == WM_MOUSEACTIVATE) {
+    if (type == "windows_generic_MSG" && msg->message == WM_MOUSEACTIVATE) {
         *result = MA_NOACTIVATE;
         return true;
     }

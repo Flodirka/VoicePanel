@@ -23,6 +23,12 @@ static bool patternAvailable(IUIAutomationElement *el, PROPERTYID prop) {
 
 namespace VoicePanel {
 
+FocusTarget retainFocusTarget(const FocusTarget &target) {
+    if (target.elementHandle)
+        reinterpret_cast<IUIAutomationElement *>(target.elementHandle)->AddRef();
+    return target;
+}
+
 void releaseFocusTarget(FocusTarget &target) {
     if (target.elementHandle)
         reinterpret_cast<IUIAutomationElement *>(target.elementHandle)->Release();

@@ -51,8 +51,8 @@ _Actual Qt widgets with sample text. The toolbar and Preview remain frameless._
 
 - **Continuous dictation.** Silero VAD separates utterances. Final results stay ordered while later audio is recorded. Partial recognition is for preview only.
 - **Correction and translation.** Process completed sentences locally. English and Russian are selected from the text. One editable context document supplies terminology to recognition and text processing.
-- **A review editor.** Compare original and processed text, accept or reject corrections, and make manual edits. Late results preserve your edits.
-- **Remembered-target insertion.** Reuse Windows UI Automation and clipboard paste. Insert only new text, keep failed results for retry, and retain documents across silence resets.
+- **A review editor.** Compare original and processed text, accept or reject all current corrections in one click, and make manual edits. Late results preserve your edits.
+- **Remembered-target insertion.** Reuse Windows UI Automation and clipboard paste. Insert only new text. Failed insertion does not lock recording or silence reset; History keeps earlier text and insertion progress for retry.
 - **Voice playback and profiles.** Speak typed text, save WAV audio, and record or import a reference for local voice cloning. English and Russian can use different profiles.
 - **A separate service.** Use transcription, synthesis, text processing and chat endpoints without opening the panel. A server tray indicator manages the local service.
 - **Local records.** Save original text, processed text, translations and reviewed output as Markdown. Voice references and preferences stay local.
@@ -99,7 +99,7 @@ Voice profile and process-control endpoints are documented in the [API reference
 
 ## Privacy and practical limits
 
-The default local configuration runs inference on your machine. Downloads require a network connection. Choosing an external text-processing endpoint sends the corresponding text and context to that endpoint. Clipboard insertion temporarily uses the system clipboard and restores it when possible. Optional Markdown records and voice references are local files; transcript logging is disabled by default.
+The default local configuration runs inference on your machine. Downloads require a network connection. Choosing an external text-processing endpoint sends the corresponding text and context to that endpoint. Clipboard insertion temporarily uses the system clipboard and restores it when possible. Voice references and Markdown records are local files. Panel auto-save is enabled by default and uses your selected folder, or `transcripts` under VoicePanel's local application-data directory when no folder is selected. Disable auto-save to prevent automatic transcript-file writes. Unsaved History remains in memory until the panel exits. Service transcript logging is disabled by default.
 
 Windows 11 is the tested desktop platform. Other desktop platforms are not supported by the current panel. Standard Notepad insertion is verified; specialized or elevated fields may reject Windows input. Copy remains available. Processing speed depends on the model, engine and hardware. Real CPU inference is not a guarantee of real-time transcription.
 

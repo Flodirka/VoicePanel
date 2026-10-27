@@ -7,6 +7,11 @@
 
 namespace VoicePanel {
 
+QString Settings::transcriptDirectory() const {
+    if (!markdownDir.isEmpty() || !autoSaveSessions) return markdownDir;
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/transcripts";
+}
+
 void Settings::load() {
     QSettings s;
     s.beginGroup("panel");

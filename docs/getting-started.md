@@ -78,6 +78,10 @@ Check `http://127.0.0.1:8080/health` for service health. A healthy gateway does 
 
 Open a text field in Notepad. Press Ctrl+Alt+D, speak, pause, and continue. Completed processed text should arrive while capture stays active. Press the shortcut again and wait for the remaining work. Use Ctrl+Alt+R when you want Preview and confirmation before insertion. The shortcuts are configurable in Settings.
 
+Accept and Reject apply to all current corrections in one click. Quick dictation starts a new transcript after the configured silence interval while capture stays open. An insertion error does not prevent continuing or starting another recording. Use History in Preview while stopped to restore earlier text and retry Insert, Copy or Save.
+
+Panel auto-save is enabled by default. It writes stable text and reviewed edits to your selected folder, or to `transcripts` in VoicePanel's local application-data directory when no folder is selected. Settings shows the effective folder. Disable auto-save to prevent automatic transcript-file writes; History then remains in memory until the panel exits.
+
 Review the remembered target and use Copy if the field rejects insertion. A normal application cannot inject input into every elevated or protected field. Do not run VoicePanel as administrator merely to avoid that boundary.
 
 ## Network and privacy
