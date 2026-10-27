@@ -8,9 +8,9 @@
 </p>
 
 <p align="center">
-  <a href="docs/getting-started.md"><img src="assets/readme/get-started.svg" alt="Get started" height="44"></a>
-  <a href="docs/api.md"><img src="assets/readme/api.svg" alt="API reference" height="44"></a>
-  <a href="#support-the-project"><img src="assets/readme/support.svg" alt="Support the project" height="44"></a>
+  <a href="docs/getting-started.md"><img src="assets/readme/get-started.svg" alt="Get started" height="36"></a>
+  <a href="docs/api.md"><img src="assets/readme/api.svg" alt="API reference" height="36"></a>
+  <a href="#support-the-project"><img src="assets/readme/support.svg" alt="Support the project" height="36"></a>
 </p>
 
 <p align="center">
@@ -139,9 +139,11 @@ Original VoicePanel code is licensed under [MIT](LICENSE). Attributed adaptation
 If VoicePanel is useful to you, you can support the time spent building and maintaining it.
 
 <p align="center">
-  <a href="https://boosty.to/gdview_gdbrain/donate"><img src="assets/readme/boosty.svg" alt="Support on Boosty" height="44"></a>
-  <a href="https://dalink.to/flodirka"><img src="assets/readme/donation-alerts.svg" alt="Support on DonationAlerts" height="44"></a>
-  <a href="https://www.patreon.com/15806620/join"><img src="assets/readme/patreon.svg" alt="Support on Patreon" height="44"></a>
+  <a href="https://boosty.to/gdview_gdbrain/donate"><img src="assets/readme/boosty.svg" alt="Support on Boosty" height="36"></a>
+  <a href="https://dalink.to/flodirka"><img src="assets/readme/donation-alerts.svg" alt="Support on DonationAlerts" height="36"></a>
+  <a href="https://www.patreon.com/15806620/join"><img src="assets/readme/patreon.svg" alt="Support on Patreon" height="36"></a>
 </p>
 
 Support is voluntary. These links open external services. See [Support](SUPPORT.md).
+
+[README asset notices](assets/readme/NOTICES.md) · Inter and Lucide.
