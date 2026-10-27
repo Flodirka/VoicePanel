@@ -1,0 +1,138 @@
+# Voice AI Service configuration (copy to config.yaml and edit as needed).
+# Relative paths resolve against the repository root. ${ENV} expansion is supported.
+#
+# COMPUTE MODEL
+#   main   (audio.cpp)  - ASR + built-in voices; CPU by default, always running.
+#   clone  (audio.cpp)  - zero-shot cloning only; GPU by default, started by the
+#                         first cloning request and stopped after idle_stop_s, so
+#                         the GPU is free for games and other local workloads.
+#   llm    (llama.cpp)  - text correction/translation; gpu_layers 0 = CPU.
+# Switch a block to the other device by pointing `binary` at the matching build
+# and setting `backend` (cpu | cuda | vulkan).
+
+service:
+  host: 127.0.0.1        # keep loopback unless you really need LAN exposure
+  port: 8080
+  # Optional bearer auth. Add an `auth_token` field here, or export the
+  # VOICE_SERVICE_AUTH_TOKEN environment variable before starting the service.
+  allow_origins: []      # browser origins allowed to call the API (e.g. http://localhost:5173)
+  max_upload_mb: 200
+
+asr:
+  default: qwen3-asr     # qwen3-asr (~5x realtime on CPU) | whisper (timestamps)
+
+tts:
+  default: auto          # auto -> Kokoro for English; Russian uses the clone model + a voice profile
+  clone_model: qwen3-tts-clone   # model recorded for new voice profiles
+
+llm:
+  enabled: true
+
+sessions:                # WebSocket dictation (/v1/sessions/dictation)
+  vad_model: runtime/models/silero_vad.onnx
+  speculative: true
+  speech_threshold: 0.5
+  silence_frames: 24     # 512-sample frames of silence (~0.77 s) to finalise an utterance
+  min_speech_frames: 6
+  preroll_frames: 11
+  max_utterance_s: 30
+  speculate_every_frames: 63
+
+logging:
+  transcripts: false     # privacy: transcript content is never written to logs by default
+  level: info
+
+backends:
+  # ---------------------------------------------------------------- main (CPU)
+  audiocpp:
+    binary: runtime/bin/audiocpp-cpu/audiocpp_server.exe
+    backend: cpu         # cuda | vulkan | cpu
+    device: 0
+    threads: 8
+    host: 127.0.0.1
+    port: 8101
+    lazy_load: true
+    idle_unload_ms: 90000   # audio.cpp unloads idle models itself
+    max_loaded_models: 2
+    start_timeout_s: 90
+    idle_stop_s: 1800       # gateway stops the whole process after this idle time
+    espeak_lib: runtime/third_party/espeak-ng/eSpeak NG/libespeak-ng.dll
+    espeak_data: runtime/third_party/espeak-ng/eSpeak NG/espeak-ng-data
+    voice_dir: runtime/voice-library   # zero-shot cloning profiles (see /v1/voices)
+    models:
+      - id: qwen3-asr
+        family: qwen3_asr
+        path: runtime/models/qwen3-asr-0.6b-q8_0.gguf
+        task: asr
+        mode: offline
+        language: auto
+      - id: kokoro            # English TTS (fast even on CPU)
+        family: kokoro_tts
+        path: runtime/models/kokoro-82m-q8_0.gguf
+        task: tts
+        mode: offline
+        voice: af_heart
+
+  # ------------------------------------------------------- clone helper (GPU)
+  # Started only for cloning (profile preview and cloned-voice synthesis),
+  # stopped after idle_stop_s to release VRAM. Disable to run cloning on the
+  # main CPU process (then add qwen3-tts-clone to audiocpp.models).
+  audiocpp_clone:
+    enabled: true
+    binary: runtime/bin/audiocpp-cuda/audiocpp_server.exe
+    backend: cuda        # cpu | cuda | vulkan
+    device: 0
+    threads: 8
+    host: 127.0.0.1
+    port: 8104
+    lazy_load: true
+    idle_unload_ms: 60000
+    max_loaded_models: 1
+    start_timeout_s: 90
+    idle_stop_s: 120     # stop the GPU process after 2 minutes without cloning
+    voice_dir: runtime/voice-library
+    models:
+      - id: qwen3-tts-clone   # zero-shot voice cloning, ru/en + 8 languages
+        family: qwen3_tts
+        path: runtime/models/qwen3-tts-12hz-0.6b-base-q8_0.gguf
+        task: tts
+        mode: offline
+        session_options:
+          qwen3_tts.voice_prompt_cache_slots: "4"   # cache conditioning per profile
+
+  whisper:
+    enabled: true            # CPU; provides timestamped segments for file transcription
+    binary: runtime/bin/whisper-cpu/Release/whisper-server.exe
+    host: 127.0.0.1
+    port: 8102
+    model_path: runtime/models/ggml-small.bin   # swap to ggml-large-v3-turbo-q5_0.bin for better accuracy
+    language: auto
+    threads: 8
+    idle_stop_s: 1800
+
+  llama:
+    # Text correction/translation on the CPU. Qwen3-4B Q4_K_M is the default:
+    # ~2.5 GB resident, about 1.3 s per sentence.
+    #
+    # Qwen3.5-0.8B Q4_K_M (runtime/models/qwen3.5-0.8b-q4_k_m.gguf, ~530 MB,
+    # ~800 MB resident, ~0.5 s) is measured and works, but it rewrites sentences
+    # instead of correcting them; keep it for experiments, not for dictation.
+    #
+    # The service can either start this model itself (binary + model_path below)
+    # or use a llama.cpp server you already run - an agent's model on the GPU,
+    # for instance. Set `external: true`, point host/port at that server, and set
+    # model_alias to the name it answers to. The service then adopts it while it
+    # answers and never starts or stops it; if it is down, text processing fails
+    # with a clear error instead of starting a second copy.
+    external: false
+    binary: runtime/bin/llama-vulkan/llama-server.exe
+    variant_dirs: [runtime/bin/llama-cuda, runtime/bin/llama-vulkan]
+    host: 127.0.0.1
+    port: 8103
+    model_path: runtime/models/qwen3-4b-instruct-2507-q4_k_m.gguf
+    model_alias: qwen3-4b
+    ctx_size: 8192
+    gpu_layers: 0            # 0 = CPU only
+    flash_attn: true
+    threads: 8
+    idle_stop_s: 900         # stop the process after fifteen idle minutes

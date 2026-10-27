@@ -1,0 +1,488 @@
+/* A Game Designer's View — dark app chrome (Diogen design system).
+ * Tokens: surface-0 #110e16, surface-1 #19141f, surface-2 #201b27,
+ * surface-3 #2a2432, cream #faf1cc, muted #c9bd9a, amber #ee9a3a,
+ * amber-pressed #d98421, error #e5544e, success #3fa37a,
+ * line-soft cream 8%, line-input 16%, line-control 40%.
+ * Radii: sm 4 (tags), md 8 (buttons, inputs), lg 12 (dialogs, cards),
+ * xl 20 (floating panel). Type: Inter, ui 14/500 on controls.
+ */
+
+QWidget, QDialog, QMenu {
+    background-color: #110e16;
+    color: #faf1cc;
+}
+
+QDialog {
+    font-family: "Inter", "Segoe UI", sans-serif;
+}
+
+#dialogShell {
+    background: #110e16;
+    border: 1px solid rgba(250, 241, 204, 0.16);
+    border-radius: 12px;
+}
+
+#dialogHeader {
+    background: #19141f;
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+    border-bottom: 1px solid rgba(250, 241, 204, 0.08);
+}
+
+QGroupBox {
+    background: #19141f;
+    border: 1px solid rgba(250, 241, 204, 0.08);
+    border-radius: 12px;
+    margin-top: 22px;
+    padding: 16px;
+    font-weight: 600;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 2px;
+    color: #faf1cc;
+}
+
+QSizeGrip { background: transparent; width: 16px; height: 16px; }
+
+/* The settings page sits on the dialog surface-0, and its viewport with it:
+   a transparent viewport would fall back to the platform palette, which is how
+   native-looking chrome and off-theme fonts used to leak through. */
+#settingsPage,
+QScrollArea#settingsPage,
+QScrollArea#settingsPage > QWidget#qt_scrollarea_viewport {
+    background: #110e16;
+}
+
+/* Rounded floating shell: the frameless window paints its own surface. */
+QMainWindow {
+    background: transparent;
+}
+
+#panelRoot {
+    background: #19141f;
+    border: 1px solid rgba(250, 241, 204, 0.08);
+    border-radius: 20px;
+    color: #faf1cc;
+}
+
+#compactBar {
+    background: transparent;
+    border: none;
+}
+
+#editorPage {
+    background: #110e16;
+    border: 1px solid rgba(250, 241, 204, 0.08);
+    border-radius: 12px;
+}
+
+QLabel {
+    background: transparent;
+    color: #faf1cc;
+    font-family: "Inter", "Segoe UI", sans-serif;
+}
+
+QLabel[role="muted"] {
+    color: #c9bd9a;
+}
+
+QLabel[role="caption"] {
+    color: rgba(250, 241, 204, 0.52);
+    font-size: 12px;
+}
+
+QLabel[role="dialogTitle"] {
+    color: #faf1cc;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+/* Settings: one header above each card, never a title on the card border. */
+#settingsPage {
+    background: #110e16;
+}
+
+QLabel[role="section"] {
+    color: #faf1cc;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 10px 2px 2px;
+}
+
+#settingsCard {
+    background: #19141f;
+    border: 1px solid rgba(250, 241, 204, 0.08);
+    border-radius: 12px;
+}
+
+#settingsCard QLabel {
+    color: #c9bd9a;              /* text-muted for field labels */
+    background: transparent;
+    font-size: 14px;
+}
+
+#settingsCard QCheckBox {
+    color: #faf1cc;
+}
+
+#settingsFooter {
+    background: #19141f;
+    border-top: 1px solid rgba(250, 241, 204, 0.08);
+}
+
+/* Buttons: ui 14/500, radius-md, 36px tall (sm 32, icon 32). */
+QPushButton {
+    background: #201b27;
+    color: #faf1cc;
+    border: 1px solid rgba(250, 241, 204, 0.08);
+    border-radius: 8px;
+    padding: 6px 14px;
+    min-height: 22px;
+    font-family: "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+QPushButton:hover {
+    background: #2a2432;
+}
+
+QPushButton:pressed {
+    background: #2a2432;
+    border-color: rgba(250, 241, 204, 0.4);
+}
+
+QPushButton:disabled {
+    color: rgba(250, 241, 204, 0.52);
+    background: #19141f;
+    border-color: rgba(250, 241, 204, 0.06);
+}
+
+QPushButton:focus {
+    border: 1px solid #ee9a3a;
+}
+
+QPushButton[variant="primary"] {
+    background: #ee9a3a;
+    color: #110e16;
+    border: 1px solid #ee9a3a;
+    font-weight: 600;
+}
+
+QPushButton[variant="primary"]:hover {
+    background: rgba(238, 154, 58, 0.9);
+}
+
+QPushButton[variant="primary"]:pressed {
+    background: #d98421;
+}
+
+QPushButton[variant="primary"]:disabled {
+    background: rgba(238, 154, 58, 0.35);
+    color: rgba(17, 14, 22, 0.55);
+    border-color: transparent;
+}
+
+QPushButton[variant="outline"]:disabled,
+QPushButton[variant="ghost"]:disabled {
+    color: rgba(250, 241, 204, 0.35);
+    border-color: rgba(250, 241, 204, 0.12);
+    background: transparent;
+}
+
+QPushButton[variant="secondary"] {
+    background: #201b27;
+    border: 1px solid rgba(250, 241, 204, 0.08);
+}
+
+QPushButton[variant="outline"] {
+    background: transparent;
+    border: 1px solid rgba(250, 241, 204, 0.4);
+}
+
+QPushButton[variant="outline"]:hover {
+    background: rgba(250, 241, 204, 0.08);
+}
+
+QPushButton[variant="ghost"] {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #c9bd9a;
+}
+
+QPushButton[variant="ghost"]:hover {
+    background: rgba(250, 241, 204, 0.08);
+    color: #faf1cc;
+}
+
+QPushButton[variant="destructive"] {
+    background: rgba(229, 84, 78, 0.6);
+    border: 1px solid rgba(229, 84, 78, 0.6);
+    color: #faf1cc;
+}
+
+QPushButton[variant="destructive"]:hover {
+    background: rgba(229, 84, 78, 0.8);
+}
+
+QPushButton[size="icon"] {
+    padding: 0;
+    min-width: 0;
+    min-height: 0;
+}
+
+/* Steppers read as arrows, not as dots: a wider click strip and a 13px chevron. */
+QSpinBox::up-button,
+QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 26px;
+    height: 15px;
+    border: none;
+    border-left: 1px solid rgba(250, 241, 204, 0.16);
+    border-top-right-radius: 7px;
+    background: transparent;
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 26px;
+    height: 15px;
+    border: none;
+    border-left: 1px solid rgba(250, 241, 204, 0.16);
+    border-bottom-right-radius: 7px;
+    background: transparent;
+}
+
+QSpinBox::up-button:hover,
+QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover,
+QDoubleSpinBox::down-button:hover {
+    background: #2a2432;
+}
+
+QSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow {
+    image: url(:/icons/chevron-up-sm.svg);
+    width: 13px;
+    height: 13px;
+}
+
+QSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow {
+    image: url(:/icons/chevron-down-sm.svg);
+    width: 13px;
+    height: 13px;
+}
+
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QPlainTextEdit,
+QTextEdit {
+    background: #201b27;
+    color: #faf1cc;
+    border: 1px solid rgba(250, 241, 204, 0.16);
+    border-radius: 8px;
+    padding: 5px 8px;
+    font-family: "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+    selection-background-color: rgba(238, 154, 58, 0.35);
+    selection-color: #faf1cc;
+}
+
+QSpinBox,
+QDoubleSpinBox {
+    padding-right: 32px;
+}
+
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus,
+QPlainTextEdit:focus,
+QTextEdit:focus {
+    border: 1px solid #ee9a3a;
+}
+
+QLineEdit:disabled,
+QComboBox:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled {
+    color: rgba(250, 241, 204, 0.52);
+}
+
+/* Profile lists read as lists: rows, hover, one selected row. */
+QListWidget {
+    background: #110e16;
+    border: 1px solid rgba(250, 241, 204, 0.08);
+    border-radius: 8px;
+    padding: 4px;
+    outline: none;
+    font-family: "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+
+QListWidget::item {
+    color: #faf1cc;
+    padding: 8px 10px;
+    border-radius: 6px;
+}
+
+QListWidget::item:hover {
+    background: #2a2432;
+}
+
+QListWidget::item:selected {
+    background: rgba(238, 154, 58, 0.18);
+    color: #faf1cc;
+}
+
+QListWidget:focus {
+    border: 1px solid rgba(250, 241, 204, 0.16);
+}
+
+QComboBox {
+    padding-right: 28px;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 26px;
+}
+
+QComboBox::down-arrow {
+    image: url(:/icons/chevron-down.svg);
+    width: 16px;
+    height: 16px;
+}
+
+/* Compact bar: mode/language read as quiet chips, not as form fields. */
+QComboBox[variant="chip"] {
+    background: rgba(250, 241, 204, 0.06);
+    border: 1px solid rgba(250, 241, 204, 0.08);
+    border-radius: 8px;
+    padding: 4px 24px 4px 8px;
+    color: #c9bd9a;
+    font-size: 13px;
+    min-height: 20px;
+}
+
+QComboBox[variant="chip"]:hover,
+QComboBox[variant="chip"]:on {
+    background: rgba(250, 241, 204, 0.08);
+    border-color: rgba(250, 241, 204, 0.16);
+    color: #faf1cc;
+}
+
+QComboBox[variant="chip"]::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox[variant="chip"]::down-arrow {
+    width: 12px;
+    height: 12px;
+}
+
+QComboBox QAbstractItemView {
+    background: #201b27;
+    color: #faf1cc;
+    border: 1px solid rgba(250, 241, 204, 0.16);
+    border-radius: 8px;
+    padding: 4px;
+    selection-background-color: #2a2432;
+    outline: none;
+}
+
+QCheckBox {
+    background: transparent;
+    color: #faf1cc;
+    spacing: 8px;
+    font-family: "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid rgba(250, 241, 204, 0.4);
+    background: #201b27;
+}
+
+QCheckBox::indicator:checked {
+    image: url(:/icons/check.svg);
+    background: transparent;
+    border: none;
+}
+
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background: rgba(250, 241, 204, 0.16);
+    border-radius: 5px;
+    min-height: 24px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: rgba(250, 241, 204, 0.3);
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+    height: 0;
+}
+
+QMenu {
+    background: #201b27;
+    color: #faf1cc;
+    border: 1px solid rgba(250, 241, 204, 0.16);
+    border-radius: 8px;
+    padding: 4px;
+    font-family: "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+
+QMenu::item {
+    border-radius: 4px;
+    padding: 6px 24px 6px 10px;
+}
+
+QMenu::item:selected {
+    background: #2a2432;
+}
+
+QMenu::separator {
+    height: 1px;
+    background: rgba(250, 241, 204, 0.08);
+    margin: 4px 8px;
+}
+
+QToolTip {
+    background: #201b27;
+    color: #faf1cc;
+    border: 1px solid rgba(250, 241, 204, 0.16);
+    border-radius: 6px;
+    padding: 4px 8px;
+}

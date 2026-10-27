@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "downloads": [
+    {
+      "group": "runtime",
+      "name": "audio-v0.9.2-bin-windows-x64-cpu-portable.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-bin-windows-x64-cpu-portable.zip",
+      "sha256": "4bea04239d753d2d0a294580ad4af2a0fa81b0de244a1b9146650c7f9fa4e84d",
+      "destination": "downloads/bin/audio-cpu.zip",
+      "extract_to": "runtime/bin/audiocpp-cpu"
+    },
+    {
+      "group": "runtime",
+      "name": "audio-v0.9.2-bin-windows-x64-vulkan.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-bin-windows-x64-vulkan.zip",
+      "sha256": "271402eae94195b9e2204e9f07e576bd0df879c75bafb0fa2f940830648d63f9",
+      "destination": "downloads/bin/audio-vulkan.zip",
+      "extract_to": "runtime/bin/audiocpp-vulkan"
+    },
+    {
+      "group": "runtime",
+      "name": "llama-b11871-bin-win-cpu-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/llama-b11871-bin-win-cpu-x64.zip",
+      "sha256": "a39ae0a534a3ccfbf5c10b5b5c662da93cecac3c796173de786b7e89f4f0ccfa",
+      "destination": "downloads/bin/llama-cpu.zip",
+      "extract_to": "runtime/bin/llama-cpu"
+    },
+    {
+      "group": "runtime",
+      "name": "llama-b11871-bin-win-cuda-12.4-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/llama-b11871-bin-win-cuda-12.4-x64.zip",
+      "sha256": "ab901a45d4315e3c074bde7cf505c86a8c6261fab97099683e1de666c3370ee9",
+      "destination": "downloads/bin/llama-cuda.zip",
+      "extract_to": "runtime/bin/llama-cuda"
+    },
+    {
+      "group": "runtime",
+      "name": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+      "destination": "downloads/bin/llama-cudart.zip",
+      "extract_to": "runtime/bin/llama-cuda"
+    },
+    {
+      "group": "runtime",
+      "name": "llama-b11871-bin-win-vulkan-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/llama-b11871-bin-win-vulkan-x64.zip",
+      "sha256": "34a0366b9d9d22d09a58dd2958570f2549568067f3f15de771fc1909e888dd80",
+      "destination": "downloads/bin/llama-vulkan.zip",
+      "extract_to": "runtime/bin/llama-vulkan"
+    },
+    {
+      "group": "runtime",
+      "name": "whisper-bin-x64.zip",
+      "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
+      "sha256": "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb",
+      "destination": "downloads/bin/whisper-cpu.zip",
+      "extract_to": "runtime/bin/whisper-cpu"
+    },
+    {
+      "group": "clone",
+      "name": "audio-v0.9.2-bin-windows-x64-cuda12.4.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-bin-windows-x64-cuda12.4.zip",
+      "sha256": "099bd43b74a5175fd9e03ac95c9fabe8b97718826d547890a03950483e81b168",
+      "destination": "downloads/bin/audiocpp-cuda.zip",
+      "extract_to": "runtime/bin/audiocpp-cuda"
+    },
+    {
+      "group": "clone",
+      "name": "audio-v0.9.2-cudart-windows-x64-cuda12.4.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-cudart-windows-x64-cuda12.4.zip",
+      "sha256": "50e278d213daa38e782a10b501b764c5c0738381898dacee7243101b890eeb0d",
+      "destination": "downloads/bin/audiocpp-cudart.zip",
+      "extract_to": "runtime/bin/audiocpp-cuda"
+    },
+    {
+      "group": "runtime",
+      "name": "qwen3-asr-0.6b-q8_0.gguf",
+      "url": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/6d5436fc85f7a20c2e9f4e472b7f3a532f686444/Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf",
+      "sha256": "6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
+      "destination": "runtime/models/qwen3-asr-0.6b-q8_0.gguf"
+    },
+    {
+      "group": "runtime",
+      "name": "chatterbox-q8_0.gguf",
+      "url": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/6d5436fc85f7a20c2e9f4e472b7f3a532f686444/Chatterbox-GGUF/chatterbox-q8_0.gguf",
+      "sha256": "d586dd1aa59613cab8046176fb7ca5ba191c02a9b10ffa5b0d892ed22b470656",
+      "destination": "runtime/models/chatterbox-q8_0.gguf"
+    },
+    {
+      "group": "runtime",
+      "name": "kokoro-82m-q8_0.gguf",
+      "url": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/351dbab8d8534675ee29440bb402e348b09e55e2/Kokoro-82M-GGUF/kokoro-82m-q8_0.gguf",
+      "sha256": "5d800fd204029302c10313daeafdb31c875c7c29ae31974d0d156cc7f512d1d0",
+      "destination": "runtime/models/kokoro-82m-q8_0.gguf"
+    },
+    {
+      "group": "clone",
+      "name": "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+      "url": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/874fcb41ececda20bcbc0782d6b4ea7f7d069ea8/Qwen3-TTS-12Hz-0.6B-Base-GGUF/qwen3-tts-12hz-0.6b-base-q8_0.gguf",
+      "sha256": "c7d0e6c9485a25ae1f6a4c0796f0023230a0051c44cbd2bd05d73770f2cce637",
+      "destination": "runtime/models/qwen3-tts-12hz-0.6b-base-q8_0.gguf"
+    },
+    {
+      "group": "runtime",
+      "name": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
+      "destination": "runtime/models/qwen3-4b-instruct-2507-q4_k_m.gguf"
+    },
+    {
+      "group": "runtime",
+      "name": "ggml-base.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
+      "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+      "destination": "runtime/models/ggml-base.bin"
+    },
+    {
+      "group": "runtime",
+      "name": "ggml-large-v3-turbo-q5_0.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
+      "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+      "destination": "runtime/models/ggml-large-v3-turbo-q5_0.bin"
+    },
+    {
+      "group": "runtime",
+      "name": "ggml-small.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+      "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+      "destination": "runtime/models/ggml-small.bin"
+    },
+    {
+      "group": "extras",
+      "name": "silero-vad",
+      "url": "https://raw.githubusercontent.com/snakers4/silero-vad/bfdc0193023f121ea5b3cc7b176dbed570a68a59/src/silero_vad/data/silero_vad.onnx",
+      "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+      "destination": "runtime/models/silero_vad.onnx"
+    },
+    {
+      "group": "extras",
+      "name": "onnxruntime-1.20.1",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip",
+      "sha256": "78d447051e48bd2e1e778bba378bec4ece11191c9e538cf7b2c4a4565e8f5581",
+      "destination": "downloads/bin/onnxruntime.zip",
+      "extract_to": "runtime/third_party/onnxruntime",
+      "strip_prefix": "onnxruntime-win-x64-1.20.1/"
+    }
+  ]
+}

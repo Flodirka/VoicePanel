@@ -1,0 +1,26 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>theme.qss</file>
+        <file>default-context.md</file>
+        <file>fonts/Inter-Variable.ttf</file>
+        <file>fonts/OFL.txt</file>
+        <file>icons/mic.svg</file>
+        <file>icons/cog.svg</file>
+        <file>icons/text-box.svg</file>
+        <file>icons/close.svg</file>
+        <file>icons/pin.svg</file>
+        <file>icons/grip.svg</file>
+        <file>icons/server.svg</file>
+        <file>icons/stop.svg</file>
+        <file>icons/chevron-down.svg</file>
+        <file>icons/chevron-up.svg</file>
+        <file>icons/chevron-down-sm.svg</file>
+        <file>icons/chevron-up-sm.svg</file>
+        <file>icons/check.svg</file>
+        <file>icons/clipboard.svg</file>
+        <file>icons/folder.svg</file>
+        <file>icons/play.svg</file>
+        <file>icons/volume.svg</file>
+    </qresource>
+</RCC>

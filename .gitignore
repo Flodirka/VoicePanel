@@ -1,0 +1,63 @@
+# Runtime artefacts (models, binaries, Qt, logs, state) are not versioned.
+/runtime/
+/runtime/models/
+/runtime/bin/
+/runtime/Qt/
+/runtime/third_party/
+/runtime/logs/
+/runtime/state/
+/runtime/*.wav
+/runtime/*.json
+
+# Private voice samples and profiles — never commit them.
+/runtime/voice-library/
+
+# Downloads and attachments.
+/downloads/
+/attachments/
+
+# Panel build tree.
+/panel/build/
+
+# Local configuration may contain tokens and machine-specific paths.
+/config.yaml
+/config.local.yaml
+
+# Third-party reference checkouts live in their own repositories.
+/research-notes/audio-cpp-src/
+/research-notes/pithagoras-src/
+
+# Agent workspace.
+/.zwork/
+/.workbuddy-ai/
+/.freebuff/
+/.agents/
+/.codex/
+
+# Local build helpers, captures and interrupted test runs.
+/panel/build*/
+/panel/build_temp.bat
+/tools/check_build.ps1
+/test-state-*/
+/test-records/
+/*.png
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Python / tooling caches.
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Logs.
+*.log
+
+# OS files.
+Thumbs.db
+.DS_Store
