@@ -1,5 +1,6 @@
 #pragma once
 #include "core/FocusTracker.h"
+#include "core/MarkdownStore.h"
 #include "core/TextDiff.h"
 #include <QDateTime>
 #include <QLabel>
@@ -54,6 +55,9 @@ private:
     void configureProcessing();
     void updateServiceStatus();
     bool saveSessionRecord(bool confirmed = false, bool force = false);
+    SessionRecord sessionRecord(bool confirmed);
+    void preserveTranscript();
+    void restoreTranscript(int index);
     void updateOriginal();
     void updateResult();
     void updateActions();
@@ -65,6 +69,7 @@ private:
     QString nearestEdge() const;
     void saveGeometrySettings();
     void reviewCorrection(bool accept);
+    void reviewCorrections(bool accept);
     void showCorrections();
     QVector<TextChange> pendingChanges(const QString &original, const QString &result) const;
     void insertResult(bool automatic = false);
@@ -87,6 +92,7 @@ private:
     QPushButton *insertButton_ = nullptr;
     QPushButton *copyButton_ = nullptr;
     QPushButton *saveButton_ = nullptr;
+    QPushButton *historyButton_ = nullptr;
     QPushButton *acceptButton_ = nullptr;
     QPushButton *rejectButton_ = nullptr;
     QPushButton *translateButton_ = nullptr;
@@ -113,6 +119,7 @@ private:
     bool speechActive_ = false;
     bool insertedEarlierDocument_ = false;
     bool userEditedResult_ = false;
+    bool reviewedConfirmed_ = false;
     bool changingGeometry_ = true;
     bool dragging_ = false;
     bool dragArmed_ = false;
@@ -137,5 +144,16 @@ private:
     quint64 generation_ = 0;
     QDateTime sessionStartedAt_;
     QDateTime sessionEndedAt_;
+    struct PreservedTranscript {
+        SessionRecord record;
+        QString reviewedText;
+        QString insertedText;
+        FocusTarget target;
+        QVector<QPair<QString, QString>> acceptedChanges;
+        QVector<TextChange> corrections;
+        bool insertionFailed = false;
+        bool confirmed = false;
+    };
+    QVector<PreservedTranscript> preservedTranscripts_;
 };
 }

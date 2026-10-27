@@ -30,11 +30,15 @@ Headless tests skip native microphone and desktop input checks. For native cover
 3. Stop while recognition or text processing is pending. Press the hotkeys again during finalization. Check that recording does not restart and text is not duplicated.
 4. Start a second session in the same field. Check spacing and that earlier text is preserved.
 5. Use Ctrl+Alt+R. Check that Preview opens after pending work finishes and that no text enters the target until Insert is confirmed.
-6. Make the target unavailable, attempt insertion, restore the target and retry. Check that processed text is retained and only the uninserted part is sent.
-7. Test a silence reset longer than the processing time, then shorter than the processing time. Original text and translations must remain available. Disable transcript storage and repeat.
+6. Make the target unavailable and attempt insertion. Start another recording without pressing Copy. Check that capture starts, the earlier text remains in History, and restoring it while stopped keeps the original insertion progress. Restore the target and retry; only the uninserted part should be sent.
+7. Test a silence reset longer than the processing time, then shorter than the processing time. Original text and translations must remain available in History. Repeat with storage disabled and with an unwritable output folder. Neither failure should lock capture or prevent completed quick documents from moving to History.
 8. Check that both the toolbar and Preview are frameless.
+9. Check auto-save before Stop and without insertion. Verify original text, completed results and reviewed edits in the effective transcript folder. Test enabled auto-save with no custom folder, then disable auto-save and confirm that automatic writes stop.
+10. Produce several corrections. One Accept or Reject click must resolve all current corrections. Later results must preserve that decision and manual edits.
 
 Repeat insertion checks in the applications you intend to use. Notepad coverage does not establish compatibility with every application or protected field.
+
+The opt-in `desktopInsertionIntoFocusedTarget` test uses `VOICEPANEL_TARGET_TEST=1` and a unique local file path in `VOICEPANEL_TARGET_CONTINUE`. Focus the intended field and press Ctrl+Alt+D. Press it again when `target-insertion-stage.txt` says `stop-pending`. At `verify-target`, inspect the actual application field for both sentences in order, then create the confirmation file. The test must not be counted as a pass from its internal insertion state alone. Use a dedicated draft and do not submit messages. Keep the confirmation file and logs local.
 
 ## Real-model checks
 

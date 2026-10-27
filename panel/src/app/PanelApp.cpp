@@ -40,7 +40,7 @@ PanelApp::PanelApp(int &argc, char **argv) : QApplication(argc, argv) {
     store_ = std::make_unique<MarkdownStore>();
     voices_ = std::make_unique<VoiceProfiles>(service_.get());
     loadVadModel();
-    store_->setDir(settings_->markdownDir);
+    store_->setDir(settings_->transcriptDirectory());
 }
 
 void PanelApp::loadVadModel() {
@@ -108,7 +108,7 @@ QString PanelApp::applySettings() {
     processor_->setAutoTranslate(settings_->autoTranslate);
     processor_->setProfile("general");
     service_->setContext(settings_->context);
-    store_->setDir(settings_->markdownDir);
+    store_->setDir(settings_->transcriptDirectory());
     loadVadModel();
     hotkeys_->unregisterAll();
     QStringList failed;

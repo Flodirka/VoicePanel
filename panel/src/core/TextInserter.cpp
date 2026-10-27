@@ -96,6 +96,12 @@ InsertReport insertIntoTarget(const FocusTarget &target, const QString &text) {
     if (const auto *mime = clipboard->mimeData())
         for (const QString &format : mime->formats()) saved->setData(format, mime->data(format));
     clipboard->setText(insertion);
+    if (clipboard->text() != insertion) {
+        report.result = InsertResult::ClipboardFailed;
+        report.detail = QObject::tr("could not write to the clipboard");
+        if (uninit) CoUninitialize();
+        return report;
+    }
     const DWORD clipboardSequence = GetClipboardSequenceNumber();
     const auto restoreClipboard = [clipboard, clipboardSequence, saved]() {
         if (GetClipboardSequenceNumber() != clipboardSequence) return;
@@ -103,8 +109,8 @@ InsertReport insertIntoTarget(const FocusTarget &target, const QString &text) {
         for (const QString &format : saved->formats()) restored->setData(format, saved->data(format));
         clipboard->setMimeData(restored);
     };
-    if (SetForegroundWindow(hwnd)) {
-        if (target.elementHandle) {
+    if (GetForegroundWindow() == hwnd || SetForegroundWindow(hwnd)) {
+        if (target.elementHandle && target.isEditable) {
             auto *element = reinterpret_cast<IUIAutomationElement *>(target.elementHandle);
             if (FAILED(element->SetFocus())) {
                 restoreClipboard();
@@ -127,7 +133,7 @@ InsertReport insertIntoTarget(const FocusTarget &target, const QString &text) {
         ctrlV[3].ki.wVk = VK_CONTROL;
         ctrlV[3].ki.dwFlags = KEYEVENTF_KEYUP;
         const UINT sent = SendInput(4, ctrlV, sizeof(INPUT));
-        QTimer::singleShot(250, clipboard, restoreClipboard);
+        QTimer::singleShot(1000, clipboard, restoreClipboard);
         report.result = sent == 4 ? InsertResult::ClipboardFallback : InsertResult::ClipboardFailed;
         report.detail = QObject::tr("clipboard paste");
     } else {

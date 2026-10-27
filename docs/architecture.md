@@ -25,7 +25,9 @@ flowchart LR
 
 `DictationController` keeps microphone capture and Silero VAD running between utterances. It orders final recognition responses. `TextProcessor` queues stable sentences for correction or translation and keeps incomplete tails. Stop drains recognition before finishing text processing. A finalizing session ignores another start request.
 
-Quick mode inserts completed output incrementally. Review mode waits for explicit confirmation. Only successful insertion advances insertion progress. Silence rollover saves a completed quick document before clearing its panes; pending work, unavailable storage and failed insertion prevent destructive resets.
+Quick mode inserts completed output incrementally. Review mode waits for explicit confirmation. Only successful insertion advances insertion progress. Silence rollover waits for recognition and text processing, preserves the completed quick document in History, and clears the panes without closing capture. Failed insertion or storage does not block recording or rollover. Restoring History restores the remembered target and insertion progress, so a retry sends only the remaining suffix.
+
+Auto-save writes stable transcripts, processing results and reviewed edits independently of insertion. With auto-save enabled and no custom folder, `Settings::transcriptDirectory()` selects the local application-data directory under `transcripts`. Disabling auto-save prevents automatic writes. Unsaved History exists only in memory until the panel exits.
 
 `TtsPlayer` queues synthesis ahead of playback and can write combined speech to WAV. `MarkdownStore` writes session records. Settings and voice references stay outside the public source tree.
 

@@ -35,6 +35,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QSignalSpy>
 #include <QScopeGuard>
 #include <QSpinBox>
@@ -121,6 +122,7 @@ private slots:
         app_->processor()->setAutoTranslate(false);
         app_->service()->setBaseUrl(app_->settings()->serviceUrl);
         app_->settings()->quickInsert = false;
+        app_->settings()->autoSaveSessions = true;
         app_->settings()->transcriptResetS = 30;
         app_->settings()->compactGeometry.clear();
         app_->settings()->editorGeometry.clear();
@@ -174,7 +176,7 @@ private slots:
         QTest::qWait(350);
         QVERIFY(!window.processingLabel_->text().contains("Insertion failed"));
         window.onProcessedBatch("A sentence.", "A corrected sentence.");
-        QTRY_VERIFY(window.processingLabel_->text().contains("Insertion failed"));
+        QTRY_VERIFY(window.insertionFailed_);
         QCOMPARE(window.processedSoFar_, QString("A corrected sentence."));
         QVERIFY(window.recording_);
     }
@@ -197,20 +199,131 @@ private slots:
         window.recording_ = false;
     }
 
-    void silenceWithoutStorageKeepsTheDocument() {
+    void insertionFailureDoesNotBlockSilenceRollover() {
+        app_->settings()->transcriptResetS = 1;
+        MainWindow window(app_);
+        window.recording_ = window.sessionActive_ = true;
+        window.reviewMode_ = false;
+        window.target_.windowHandle = 1;
+        window.onFinalTranscript("Keep the failed insertion.", 1, 0);
+        QTRY_VERIFY(window.insertionFailed_);
+        QTRY_VERIFY_WITH_TIMEOUT(window.originalEdit_->toPlainText().isEmpty(), 4000);
+        QVERIFY(window.recording_);
+        QCOMPARE(window.preservedTranscripts_.size(), 1);
+        QCOMPARE(window.preservedTranscripts_.first().record.original, QString("Keep the failed insertion."));
+        window.recording_ = false;
+        window.restoreTranscript(0);
+        QCOMPARE(window.resultEdit_->toPlainText(), QString("Keep the failed insertion."));
+        QVERIFY(window.insertionFailed_);
+    }
+
+    void failedInsertionDoesNotRequireCopyBeforeANewSession() {
+        MainWindow window(app_);
+        window.originalSoFar_ = "The original.";
+        window.processedSoFar_ = "The processed result.";
+        window.insertedText_ = "The processed";
+        window.insertionFailed_ = true;
+        window.updateResult();
+        // Bypass hardware only in this state-transition test. The desktop
+        // workflow separately verifies a real capture restart.
+        app_->dictation()->sessionOpen_ = true;
+        window.startDictation(false);
+        QVERIFY(window.recording_);
+        QVERIFY(!window.insertionFailed_);
+        QCOMPARE(window.preservedTranscripts_.size(), 1);
+        QCOMPARE(window.preservedTranscripts_.first().insertedText, QString("The processed"));
+        window.cancelDictation();
+        window.restoreTranscript(0);
+        QCOMPARE(window.originalSoFar_, QString("The original."));
+        QCOMPARE(window.resultEdit_->toPlainText(), QString("The processed result."));
+        QCOMPARE(window.insertedText_, QString("The processed"));
+    }
+
+    void autoSaveDoesNotDependOnInsertionOrStop() {
+        QTemporaryDir directory(QDir::current().filePath("autosave-XXXXXX"));
+        const QString previous = app_->store()->dir();
+        app_->store()->setDir(directory.path());
+        const auto restore = qScopeGuard([&]() { app_->store()->setDir(previous); });
+        app_->settings()->autoSaveSessions = true;
+        MainWindow window(app_);
+        window.recording_ = true;
+        window.onFinalTranscript("An automatically saved sentence.", 1, 0);
+        QDirIterator files(directory.path(), {"*.md"}, QDir::Files, QDirIterator::Subdirectories);
+        QVERIFY2(files.hasNext(), "Stable text must be saved while recording, without inserting or pressing Copy");
+        const QString path = files.next();
+        window.resultEdit_->setPlainText("My reviewed wording.");
+        QFile record(path);
+        QVERIFY(record.open(QIODevice::ReadOnly));
+        QVERIFY(QString::fromUtf8(record.readAll()).contains("My reviewed wording."));
+        record.close();
+        window.recording_ = false;
+        window.sessionActive_ = window.finishing_ = true;
+        window.finishSession();
+        QVERIFY(record.open(QIODevice::ReadOnly));
+        QVERIFY(QString::fromUtf8(record.readAll()).contains("## Final (user-confirmed)\n\nMy reviewed wording."));
+    }
+
+    void autoSaveHasALocalDefaultWithoutACustomFolder() {
+        Settings settings;
+        QVERIFY(settings.markdownDir.isEmpty());
+        QVERIFY(settings.autoSaveSessions);
+        QCOMPARE(settings.transcriptDirectory(), QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/transcripts");
+        settings.autoSaveSessions = false;
+        QVERIFY(settings.transcriptDirectory().isEmpty());
+        settings.markdownDir = "custom-transcripts";
+        QCOMPARE(settings.transcriptDirectory(), QString("custom-transcripts"));
+    }
+
+    void saveFailureDoesNotBlockSilenceRollover() {
+        QTemporaryDir directory(QDir::current().filePath("failed-save-XXXXXX"));
+        QFile obstruction(directory.filePath("not-a-folder"));
+        QVERIFY(obstruction.open(QIODevice::WriteOnly));
+        obstruction.close();
+        const QString previous = app_->store()->dir();
+        app_->store()->setDir(obstruction.fileName());
+        const auto restore = qScopeGuard([&]() { app_->store()->setDir(previous); });
+        app_->settings()->transcriptResetS = 1;
+        MainWindow window(app_);
+        window.recording_ = true;
+        window.reviewMode_ = false;
+        window.onFinalTranscript("Preserve this when saving fails.", 1, 0);
+        QTRY_VERIFY_WITH_TIMEOUT(window.originalSoFar_.isEmpty(), 4000);
+        QVERIFY(window.recording_);
+        QCOMPARE(window.preservedTranscripts_.size(), 1);
+        QCOMPARE(window.preservedTranscripts_.first().reviewedText, QString("Preserve this when saving fails."));
+        window.recording_ = false;
+    }
+
+    void silenceRolloverPreservesAnIncompleteFinalTranscript() {
+        app_->settings()->autoCleanEditor = true;
+        app_->settings()->transcriptResetS = 1;
+        MainWindow window(app_);
+        window.recording_ = true;
+        window.reviewMode_ = false;
+        window.onFinalTranscript("A finalized utterance without punctuation", 1, 0);
+        QTRY_VERIFY_WITH_TIMEOUT(window.originalSoFar_.isEmpty(), 4000);
+        QVERIFY(window.recording_);
+        QCOMPARE(window.preservedTranscripts_.size(), 1);
+        QCOMPARE(window.preservedTranscripts_.first().reviewedText, QString("A finalized utterance without punctuation"));
+        window.recording_ = false;
+    }
+
+    void silenceWithoutStorageKeepsTheDocumentInHistory() {
         const QString previous = app_->store()->dir();
         app_->store()->setDir({});
         app_->settings()->transcriptResetS = 1;
         MainWindow window(app_);
         window.recording_ = true;
+        window.reviewMode_ = false;
         window.onFinalTranscript("Keep this document.", 1, 0);
-        QTest::qWait(1300);
-        const QString original = window.originalSoFar_;
-        const QString result = window.resultEdit_->toPlainText();
+        QTRY_VERIFY_WITH_TIMEOUT(window.originalSoFar_.isEmpty(), 4000);
+        QCOMPARE(window.preservedTranscripts_.size(), 1);
+        QCOMPARE(window.preservedTranscripts_.first().record.original, QString("Keep this document."));
         window.recording_ = false;
+        window.restoreTranscript(0);
         app_->store()->setDir(previous);
-        QCOMPARE(original, QString("Keep this document."));
-        QCOMPARE(result, QString("Keep this document."));
+        QCOMPARE(window.originalSoFar_, QString("Keep this document."));
+        QCOMPARE(window.resultEdit_->toPlainText(), QString("Keep this document."));
     }
 
     void failedProcessingIsNotFinalizedAsAnUnprocessedFragment() {
@@ -271,6 +384,52 @@ private slots:
         QVERIFY(PostThreadMessage(GetCurrentThreadId(), WM_HOTKEY, 1, 0));
         QTRY_COMPARE(triggered.size(), 1);
         QCOMPARE(triggered[0][0].toString(), QString("Ctrl+Alt+Shift+J"));
+    }
+
+    void desktopInsertionIntoFocusedTarget() {
+        if (!qEnvironmentVariableIsSet("VOICEPANEL_TARGET_TEST")) QSKIP("Opt-in Codex, Telegram or browser insertion check");
+        TestServer server;
+        app_->service()->setBaseUrl(server.url());
+        app_->settings()->autoCleanEditor = true;
+        app_->settings()->transcriptResetS = 0;
+        app_->settings()->insertHotkey = "Ctrl+Alt+D";
+        MainWindow window(app_);
+        app_->window_ = &window;
+        window.setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        app_->wireHotkeys();
+        const auto cleanup = qScopeGuard([this]() {
+            app_->window_ = nullptr;
+            app_->hotkeys()->unregisterAll();
+        });
+        QVERIFY(app_->hotkeys()->registerHotkey("Ctrl+Alt+D"));
+        window.showCompact();
+        auto stage = [](const char *value) {
+            QFile file("target-insertion-stage.txt");
+            if (file.open(QIODevice::WriteOnly)) file.write(value);
+        };
+        QSignalSpy captures(app_->dictation()->capture_, &WasapiCapture::started);
+        stage("start");
+        QTRY_VERIFY_WITH_TIMEOUT(window.recording_, 90000);
+        QTRY_COMPARE(captures.size(), 1);
+        app_->dictation()->finalTranscript("First target sentence.", 1, 0);
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, R"({"result":"VoicePanel insertion check."})");
+        QTRY_COMPARE_WITH_TIMEOUT(window.insertedText_, QString("VoicePanel insertion check."), 10000);
+        app_->dictation()->finalTranscript("Second target sentence.", 1, 1);
+        QTRY_COMPARE(server.requests.size(), 2);
+        stage("stop-pending");
+        QTRY_VERIFY_WITH_TIMEOUT(window.finishing_ && !window.recording_, 90000);
+        server.reply(1, R"({"result":"Second sentence in order."})");
+        QTRY_VERIFY_WITH_TIMEOUT(!window.finishing_, 10000);
+        QCOMPARE(window.insertedText_, QString("VoicePanel insertion check. Second sentence in order."));
+        QVERIFY(!window.insertionFailed_);
+        QCOMPARE(captures.size(), 1);
+        QTest::qWait(500);
+        stage("verify-target");
+        const QString confirmation = qEnvironmentVariable("VOICEPANEL_TARGET_CONTINUE");
+        QVERIFY2(!confirmation.isEmpty(), "Set VOICEPANEL_TARGET_CONTINUE and confirm the actual target text before completing this test");
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(confirmation), 90000);
+        stage("complete");
     }
 
     void desktopDictationWorkflow() {
@@ -375,7 +534,9 @@ private slots:
         QVERIFY(window.insertionFailed_);
         QCOMPARE(window.insertedText_, QString("Review corrected."));
         window.startDictation(false);
-        QVERIFY(!window.recording_);
+        QVERIFY(window.recording_);
+        window.cancelDictation();
+        window.restoreTranscript(window.preservedTranscripts_.size() - 1);
         window.target_.windowHandle = handle;
         stage("retry-confirm");
         QTRY_COMPARE_WITH_TIMEOUT(window.insertedText_, QString("Review corrected. Retry suffix."), 90000);
@@ -595,9 +756,7 @@ private slots:
         QCoreApplication::processEvents();
         QVERIFY(capturePanel(window, "comparison-corrections.png"));
         window.findChild<QPushButton *>("acceptCorrection")->click();
-        QCOMPARE(window.corrections_.size(), 1);
-        window.findChild<QPushButton *>("rejectCorrection")->click();
-        QCOMPARE(result->toPlainText(), QString("This is a test."));
+        QCOMPARE(result->toPlainText(), QString("This is the test."));
         QVERIFY(window.corrections_.isEmpty());
     }
 
@@ -621,6 +780,20 @@ private slots:
         QTest::qWait(20);
     }
 
+    void restoredHistoryCanRejectAllCorrections() {
+        MainWindow window(app_);
+        window.originalSoFar_ = "This are a test.";
+        window.processedSoFar_ = "This is the test.";
+        window.updateOriginal();
+        window.updateResult();
+        QCOMPARE(window.corrections_.size(), 2);
+        window.preserveTranscript();
+        window.restoreTranscript(0);
+        window.rejectButton_->click();
+        QCOMPARE(window.resultEdit_->toPlainText(), QString("This are a test."));
+        QVERIFY(window.corrections_.isEmpty());
+    }
+
     void correctionsCanBeDecidedWhileRecordingAndSurviveLaterBatches() {
         TestServer server;
         app_->settings()->autoCleanEditor = true;
@@ -638,9 +811,7 @@ private slots:
         QVERIFY(accept->isEnabled());
         QVERIFY(reject->isEnabled());
         reject->click();
-        QCOMPARE(window.resultEdit_->toPlainText(), QString("This are the test."));
-        QCOMPARE(window.corrections_.size(), 1);
-        accept->click();
+        QCOMPARE(window.resultEdit_->toPlainText(), QString("This are a test."));
         QVERIFY(window.corrections_.isEmpty());
         QVERIFY(window.recording_);
         // A later batch must keep both decisions and still reach the pane.
@@ -648,7 +819,7 @@ private slots:
         QTRY_COMPARE(server.requests.size(), 2);
         server.reply(1, R"({"result":"Another sentence."})");
         QTRY_COMPARE(window.resultEdit_->toPlainText(),
-                     QString("This are the test. Another sentence."));
+                     QString("This are a test. Another sentence."));
         QVERIFY(window.corrections_.isEmpty());
         QVERIFY(window.resultEdit_->extraSelections().isEmpty());
         window.recording_ = false;
@@ -1400,14 +1571,14 @@ private slots:
                  qPrintable(report.detail));
         QTRY_COMPARE(target.text(), QString("before inserted after"));
         QCOMPARE(submit.size(), 0);
-        QTest::qWait(300);
+        QTest::qWait(1100);
         target.setCursorPosition(target.text().size());
         auto again = captureCurrentFocus();
         const auto appended = insertIntoTarget(again, "Next sentence.");
         releaseFocusTarget(again);
         QVERIFY(appended.result == InsertResult::Ok || appended.result == InsertResult::ClipboardFallback);
         QTRY_COMPARE(target.text(), QString("before inserted after Next sentence."));
-        QTest::qWait(300);
+        QTest::qWait(1100);
     }
 
     void settingsFitAtMinimumWidth() {

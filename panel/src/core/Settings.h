@@ -48,7 +48,7 @@ struct Settings {
     bool ttsEnabled = false;
 
     // storage
-    QString markdownDir;               // empty = disabled
+    QString markdownDir;               // empty = local default when auto-save is enabled
     bool autoSaveSessions = true;
     int audioRetentionDays = 0;        // 0 = keep no audio
 
@@ -59,6 +59,7 @@ struct Settings {
 
     void load();
     void save() const;
+    QString transcriptDirectory() const;
     void loadContext();
     bool saveContext(QString *errorOut = nullptr) const;
 };

@@ -41,6 +41,13 @@
 /test-state-*/
 /test-records/
 /*.png
+# Local verification notes and desktop helpers are not public release files.
+/docs/DICTATION-VERIFICATION.md
+/docs/INTERACTION.md
+/docs/PRODUCT_SPEC.md
+/docs/REPAIR-VERIFICATION.md
+/tools/capture-panel.ps1
+/tools/kill_port.ps1
 .env
 .env.*
 *.pem
