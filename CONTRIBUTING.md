@@ -8,6 +8,8 @@ For a bug, include the expected behavior, actual behavior, Windows version, affe
 
 ## Development
 
+Work, build and commit in the existing project checkout. Keep publication archives outside the source tree and do not create a second working repository under `runtime/`. Local verification notes, recordings and recovery archives stay ignored.
+
 Follow [Getting started](docs/getting-started.md) for runtime dependencies and [Architecture](docs/architecture.md) for component ownership. Python tests can run without downloading speech models:
 
 ```powershell
