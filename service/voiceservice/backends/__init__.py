@@ -142,6 +142,10 @@ class Registry:
         return out
 
     async def stop_all(self) -> None:
+        for task in list(self.background_tasks):
+            task.cancel()     # warm-ups must not start an engine during shutdown
+        if self.background_tasks:
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
         for backend in (self.audiocpp, self.audiocpp_clone, self.whisper, self.llama):
             if backend is not None:
                 try:

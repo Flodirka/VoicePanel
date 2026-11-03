@@ -377,3 +377,107 @@ def test_websocket_keeps_listening_and_orders_finals(tmp_path: Path, monkeypatch
                     break
     finals = [e["text"] for e in loop_events if e["type"] == "final"]
     assert finals == ["utterance 0", "utterance 1"]
+
+
+# ------------------------------------------------- stale keep-alive retries
+def test_stale_pooled_connection_is_retried_once() -> None:
+    import httpx
+    from voiceservice.backends.audiocpp import _post_with_retry
+
+    class Flaky:
+        def __init__(self, failures: int) -> None:
+            self.failures, self.calls = failures, 0
+
+        async def post(self, url, **kw):
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            return httpx.Response(200, json={"text": "ok"}, request=httpx.Request("POST", url))
+
+    once = Flaky(1)
+    assert asyncio.run(_post_with_retry(once, "http://127.0.0.1:1/x")).json() == {"text": "ok"}
+    assert once.calls == 2
+    twice = Flaky(2)                      # a second failure is a real error, not a stale socket
+    with pytest.raises(httpx.RemoteProtocolError):
+        asyncio.run(_post_with_retry(twice, "http://127.0.0.1:1/x"))
+    assert twice.calls == 2
+
+
+# --------------------------------------- live dictation: failures and cancel
+def _ws_service(tmp_path: Path, monkeypatch):
+    import numpy as np
+    from voiceservice.api import sessions
+
+    class AmplitudeVAD:
+        def __init__(self, path):
+            pass
+
+        def probability(self, frame):
+            return 0.9 if float(np.abs(frame).mean()) > 0.05 else 0.0
+
+        def reset(self):
+            pass
+
+    monkeypatch.setenv("VOICE_SERVICE_AUTH_TOKEN", "")
+    (tmp_path / "runtime").mkdir(exist_ok=True)
+    vad_file = tmp_path / "vad.onnx"
+    vad_file.write_bytes(b"fake")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "backends:\n  audiocpp_clone:\n    enabled: false\n"
+        f"sessions:\n  vad_model: {vad_file.as_posix()}\n  speculative: false\n"
+        "  silence_frames: 4\n  min_speech_frames: 2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sessions, "SileroVAD", AmplitudeVAD)
+    speech = (np.full(512 * 8, 0.3, dtype=np.float32) * 32767).astype("<i2").tobytes()
+    silence = np.zeros(512 * 8, dtype="<i2").tobytes()
+    return cfg, speech + silence
+
+
+def test_websocket_reports_a_failed_final_and_keeps_order(tmp_path: Path, monkeypatch) -> None:
+    cfg, utterance = _ws_service(tmp_path, monkeypatch)
+    with TestClient(create_app(cfg), base_url="http://127.0.0.1") as client:
+        calls = []
+
+        async def transcribe(wav, *, model, language=None, **kw):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("engine restarted")
+            return {"text": f"utterance {len(calls)}"}
+
+        client.app.state.registry.audiocpp.transcribe = transcribe
+        with client.websocket_connect("ws://127.0.0.1/v1/sessions/dictation") as ws:
+            assert ws.receive_json()["type"] == "ready"
+            for _ in range(3):
+                ws.send_bytes(utterance)
+            ws.send_text('{"type":"finish"}')
+            events = []
+            while (event := ws.receive_json())["type"] != "done":
+                events.append(event)
+    texts = [(e["type"], e.get("text") or e.get("message")) for e in events if e["type"] in ("final", "error")]
+    assert texts == [("final", "utterance 1"), ("error", "transcription failed: engine restarted"),
+                     ("final", "utterance 3")]
+
+
+def test_websocket_cancel_drops_pending_finals(tmp_path: Path, monkeypatch) -> None:
+    cfg, utterance = _ws_service(tmp_path, monkeypatch)
+    cancelled = []
+    with TestClient(create_app(cfg), base_url="http://127.0.0.1") as client:
+        async def transcribe(wav, *, model, language=None, **kw):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(1)
+                raise
+            return {"text": "too late"}
+
+        client.app.state.registry.audiocpp.transcribe = transcribe
+        with client.websocket_connect("ws://127.0.0.1/v1/sessions/dictation") as ws:
+            assert ws.receive_json()["type"] == "ready"
+            ws.send_bytes(utterance)
+            assert ws.receive_json()["type"] == "speech_started"
+            ws.send_text('{"type":"cancel"}')
+            assert ws.receive_json()["type"] == "done"     # no final for the cancelled utterance
+        assert not client.app.state.registry._asr_lock.locked()
+    assert cancelled == [1]

@@ -349,7 +349,11 @@ class Lease:
         self._proc._last_used = time.monotonic()
         return self
 
-    async def __aexit__(self, *exc: Any) -> None:
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if isinstance(exc, httpx.TransportError):
+            # Connection refused, reset or timed out: the next request probes
+            # the server again instead of trusting the earlier health check.
+            self._proc._healthy = False
         self._proc._release()
 
     def release(self) -> None:

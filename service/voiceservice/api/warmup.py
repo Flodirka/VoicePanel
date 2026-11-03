@@ -97,11 +97,20 @@ async def _warm_asr(registry: Registry) -> None:
     if backend != "audiocpp":
         return   # whisper.cpp loads its model at process start; leasing is enough
     audiocpp = registry.audiocpp
-    if audiocpp.proc.running:
+
+    async def resident() -> bool:
+        if not audiocpp.proc.running:
+            return False
         loaded = {m.get("id"): m for m in await audiocpp.loaded_models()}
-        if loaded.get(model_id, {}).get("loaded"):
-            return
+        return bool(loaded.get(model_id, {}).get("loaded"))
+
+    if await resident():
+        return
     async with registry._asr_lock:
+        # A real request that held the lock before us may have loaded the
+        # model already; then the silent request would only delay the next one.
+        if await resident():
+            return
         await audiocpp.transcribe(_SILENCE_WAV, model=model_id, timeout=120.0)
 
 
