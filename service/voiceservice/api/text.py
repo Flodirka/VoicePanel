@@ -97,12 +97,24 @@ async def process_text(
         raise HTTPException(502, f"text processing failed: {exc}")
 
     choice = (data.get("choices") or [{}])[0]
-    content = choice.get("message", {}).get("content", "")
-    fallback = None
     if derived_cap and choice.get("finish_reason") == "length":
         # The model ran into the safety cap: its output is a loop or a cut-off
-        # rewrite. Return the input unchanged rather than lose dictated words.
-        content, fallback = req.text, "length"
+        # rewrite. That is a failure, not a result: answering 200 with the
+        # input would let a client insert untranslated text as a translation.
+        # The original travels back so no client loses dictated words.
+        return JSONResponse(
+            {
+                "detail": (
+                    f"text processing stopped at the generation limit ({max_tokens} tokens); "
+                    "the text was not processed"
+                ),
+                "reason": "generation_limit",
+                "max_tokens": max_tokens,
+                "original": req.text,
+            },
+            status_code=502,
+        )
+    content = choice.get("message", {}).get("content", "")
     result, notes = content, ""
     if req.explain and "---" in content:
         result, _, notes = content.partition("---")
@@ -119,7 +131,6 @@ async def process_text(
             "original": req.text,
             "result": result,
             **({"notes": notes} if notes else {}),
-            **({"fallback": fallback} if fallback else {}),
             "model": registry.llm.model_alias,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "usage": data.get("usage"),
@@ -130,12 +141,16 @@ async def process_text(
 def default_max_tokens(text: str, *, explain: bool = False) -> int:
     """Generation cap used when a request does not set max_tokens.
 
-    Qwen-family tokenizers spend roughly 0.25 (English) to 0.5 (Russian) tokens
-    per character, and a correction or translation is about as long as its
-    input. Half the character count plus a fixed margin leaves at least twice
-    the expected length, including English-to-Russian expansion.
+    Byte-level BPE tokenizers (Qwen, Llama) emit at most one token per UTF-8
+    byte, so a correction of the same length as its input stays below the
+    byte count. Measured with the Qwen vocabulary on RU/EN technical text
+    (docs/performance-audit.md, "Generation cap"): the needed output was at
+    most 57 % of the byte count in every direction, including digit-heavy
+    text, where Qwen spends one token per digit. A cap of half the character
+    count, used before, fell below the needed length for long Russian and
+    number-heavy text. The fixed margin covers short inputs and formatting.
     """
-    return len(text) // 2 + (384 if explain else 128)
+    return len(text.encode("utf-8")) + (384 if explain else 128)
 
 
 def _strip_wrapping_quotes(text: str) -> str:

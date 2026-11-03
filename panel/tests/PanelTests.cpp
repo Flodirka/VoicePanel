@@ -1517,6 +1517,97 @@ private slots:
         QCOMPARE(processor.pendingOriginal(), QString("First sentence. Second sentence."));
     }
 
+    void generationLimitKeepsTheOriginalOutOfProcessedText() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TextProcessor processor(&client);
+        processor.setMode("auto_correct");
+        processor.setAutoTranslate(true);
+        QSignalSpy batches(&processor, &TextProcessor::processedBatch);
+        QSignalSpy failures(&processor, &TextProcessor::processingFailed);
+        QSignalSpy tail(&processor, &TextProcessor::fragmentRemaining);
+        QSignalSpy finished(&processor, &TextProcessor::finished);
+        const QString original = QString::fromUtf8("Прокачка персонажа должна зависеть от лута.");
+        processor.acceptFinal(original);
+        QTRY_COMPARE(server.requests.size(), 1);
+        const auto request = QJsonDocument::fromJson(server.requests[0]->property("body").toByteArray()).object();
+        QCOMPARE(request.value("mode").toString(), QString("translate_ru_en"));
+        server.reply(0, QString(R"json({"detail":"text processing stopped at the generation limit (300 tokens)",)json"
+                                R"json("reason":"generation_limit","max_tokens":300,"original":"%1"})json").arg(original).toUtf8(), false);
+        QTRY_COMPARE(failures.size(), 1);
+        QCOMPARE(failures[0][0].toString(), original);
+        QVERIFY(failures[0][1].toString().contains("output limit"));
+        QCOMPARE(batches.size(), 0);                         // never reported as translated
+        QCOMPARE(processor.pendingOriginal(), original);     // kept for retry, review and copy
+        processor.acceptFinal("Next sentence.");             // later speech queues behind it
+        QTest::qWait(30);
+        QCOMPARE(server.requests.size(), 1);
+        processor.finish();
+        QCOMPARE(finished.size(), 1);
+        QCOMPARE(tail.size(), 0);                            // not handed over as a final tail either
+        QCOMPARE(batches.size(), 0);
+        QCOMPARE(processor.pendingOriginal(), original + " Next sentence.");
+    }
+
+    void processingModeFollowsTheSentenceLanguage() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TextProcessor processor(&client);
+        processor.setMode("auto_correct");
+        QSignalSpy batches(&processor, &TextProcessor::processedBatch);
+        const auto body = [&server](int index) {
+            return QJsonDocument::fromJson(server.requests[index]->property("body").toByteArray()).object();
+        };
+        const QString russian = QString::fromUtf8("нам нужно исправить эта ошибка.");
+        processor.acceptFinal(russian);
+        QTRY_COMPARE(server.requests.size(), 1);
+        QCOMPARE(body(0).value("mode").toString(), QString("correct_ru"));
+        server.reply(0, QString::fromUtf8(R"({"result":"Нам нужно исправить эту ошибку."})").toUtf8());
+        QTRY_COMPARE(batches.size(), 1);
+        QCOMPARE(batches[0][0].toString(), russian);
+        QCOMPARE(batches[0][1].toString(), QString::fromUtf8("Нам нужно исправить эту ошибку."));
+        processor.acceptFinal("this are a test.");
+        QTRY_COMPARE(server.requests.size(), 2);
+        QCOMPARE(body(1).value("mode").toString(), QString("correct_en"));
+        server.reply(1, R"({"result":"This is a test."})");
+        QTRY_COMPARE(batches.size(), 2);
+        processor.setAutoTranslate(true);
+        processor.acceptFinal("Open the file main.cpp.");
+        QTRY_COMPARE(server.requests.size(), 3);
+        QCOMPARE(body(2).value("mode").toString(), QString("translate_en_ru"));
+        server.reply(2, QString::fromUtf8(R"({"result":"Открой файл main.cpp."})").toUtf8());
+        QTRY_COMPARE(batches.size(), 3);
+        QCOMPARE(batches[2][1].toString(), QString::fromUtf8("Открой файл main.cpp."));
+        processor.acceptFinal(russian);
+        QTRY_COMPARE(server.requests.size(), 4);
+        QCOMPARE(body(3).value("mode").toString(), QString("translate_ru_en"));
+        server.reply(3, R"({"result":"We need to fix this error."})");
+        QTRY_COMPARE(batches.size(), 4);
+    }
+
+    void failedTranslationIsVisibleAndNotProcessed() {
+        TestServer server;
+        app_->service()->setBaseUrl(server.url());
+        app_->settings()->autoTranslate = true;
+        MainWindow window(app_);
+        window.recording_ = window.sessionActive_ = true;
+        window.reviewMode_ = false;
+        const QString original = QString::fromUtf8("Прокачка персонажа должна зависеть от лута.");
+        window.onFinalTranscript(original, 1, 0);
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, R"({"detail":"limit","reason":"generation_limit"})", false);
+        QTRY_VERIFY(window.processingLabel_->text().contains("Translation stopped"));
+        QVERIFY(window.expanded_);
+        QCOMPARE(window.originalSoFar_, original);
+        QVERIFY(window.processedSoFar_.isEmpty());           // automatic insertion sends only processed text
+        QVERIFY(window.resultEdit_->toPlainText().contains(original));   // still visible for review and copy
+        QVERIFY(window.insertedText_.isEmpty());
+        window.recording_ = window.sessionActive_ = false;
+        app_->processor()->reset();
+    }
+
     void incompleteSentenceStaysVerbatim() {
         ServiceClient client;
         TextProcessor processor(&client);

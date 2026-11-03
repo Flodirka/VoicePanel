@@ -82,6 +82,16 @@ MainWindow::MainWindow(PanelApp *app, QWidget *parent) : QMainWindow(parent), ap
     connect(app_->processor(), &TextProcessor::failed, this, [this](const QString &error) {
         processingLabel_->setText(error);
     });
+    connect(app_->processor(), &TextProcessor::processingFailed, this, [this](const QString &, const QString &error) {
+        // The unprocessed text stays in the original pane and at the end of the
+        // result pane. Automatic insertion only sends processed batches, so it
+        // never reaches the target as if it were corrected or translated.
+        processingLabel_->setText(
+            (app_->settings()->autoTranslate ? tr("Translation stopped: %1") : tr("Correction stopped: %1")).arg(error)
+            + "\n" + tr("The unprocessed text is kept at the end of the result and is not inserted automatically. "
+                        "After recording, right-click and choose Retry correction, or review and copy it."));
+        showExpanded();
+    });
     connect(&statusTimer_, &QTimer::timeout, this, &MainWindow::updateServiceStatus);
     statusTimer_.start(15000);
     // Rollover waits for recognition, processing and insertion, then saves the

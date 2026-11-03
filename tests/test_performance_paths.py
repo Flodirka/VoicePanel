@@ -201,17 +201,6 @@ def test_text_processing_caps_generation_when_the_client_sets_no_limit(service, 
     assert seen["max_tokens"] == 7
 
 
-def test_runaway_generation_returns_the_original_text(service, monkeypatch) -> None:
-    async def complete(messages, **kw):
-        return {"choices": [{"message": {"content": "loop loop loop"}, "finish_reason": "length"}]}
-
-    monkeypatch.setattr(service.app.state.registry.llm, "complete", complete)
-    resp = service.post("/v1/text/process", json={"text": "Keep my words.", "mode": "correct_en"})
-    body = resp.json()
-    assert body["result"] == "Keep my words."
-    assert body["fallback"] == "length"
-
-
 def test_explicit_limit_keeps_truncated_output(service, monkeypatch) -> None:
     async def complete(messages, **kw):
         return {"choices": [{"message": {"content": "Cut"}, "finish_reason": "length"}]}
@@ -219,8 +208,7 @@ def test_explicit_limit_keeps_truncated_output(service, monkeypatch) -> None:
     monkeypatch.setattr(service.app.state.registry.llm, "complete", complete)
     resp = service.post("/v1/text/process",
                         json={"text": "Keep my words.", "mode": "correct_en", "max_tokens": 1})
-    assert resp.json()["result"] == "Cut"
-    assert "fallback" not in resp.json()
+    assert resp.status_code == 200 and resp.json()["result"] == "Cut"
 
 
 # ----------------------------------------------------------------- warm-up

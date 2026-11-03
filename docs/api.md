@@ -73,7 +73,13 @@ Optional fields are `dictionary` (string list), `context` (string), `previous` (
 
 The response includes `mode`, `profile`, `original`, `result` and `model`. Model-backed results also include processing duration and available usage data. Explanation requests can include `notes`. Plain `dictation` returns the text without calling an LLM.
 
-When `max_tokens` is omitted or null, the service limits generation to half the input length in characters plus 128 tokens (plus 384 with `explain`). This is at least twice the expected output. If the model reaches that limit, the output is a loop or a cut-off rewrite: the response returns the original text as `result` and adds `"fallback": "length"`. An explicit `max_tokens` keeps the previous behavior and returns whatever the model generated.
+When `max_tokens` is omitted or null, the service limits generation to the UTF-8 byte length of `text` plus 128 tokens (plus 384 with `explain`). Byte-level BPE tokenizers emit at most one token per byte, so a correction of the same length stays below this limit; measured RU/EN translations needed at most 57 % of it. A model that reaches this derived limit is looping or cutting off its output, so the request fails instead of returning a partial or unchanged text:
+
+```json
+{"detail":"text processing stopped at the generation limit (310 tokens); the text was not processed","reason":"generation_limit","max_tokens":310,"original":"..."}
+```
+
+The status is `502`, `result` is absent, and `original` returns the submitted text. A client must not treat `original` as a correction or translation. An explicit `max_tokens` keeps the previous behavior: the response is `200` with whatever the model generated.
 
 ## Session warm-up
 

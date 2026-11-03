@@ -40,6 +40,10 @@ signals:
     // Unprocessed tail at end of session (incomplete sentence).
     void fragmentRemaining(const QString &fragment);
     void failed(const QString &error);
+    // A batch could not be processed (backend error or generation limit). The
+    // original stays queued in pendingOriginal() and is never reported as a
+    // processed result, so automatic insertion cannot send it.
+    void processingFailed(const QString &original, const QString &error);
     void finished();
     void pendingChanged(const QString &text);
 

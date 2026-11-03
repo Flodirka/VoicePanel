@@ -163,7 +163,10 @@ void ServiceClient::processText(const QString &text, const QString &mode,
             QJsonParseError pe;
             auto doc = QJsonDocument::fromJson(body, &pe);
             if (pe.error == QJsonParseError::NoError) {
-                auto detail = doc.object().value("detail").toString();
+                const auto obj = doc.object();
+                auto detail = obj.value("detail").toString();
+                if (obj.value("reason").toString() == "generation_limit")
+                    detail = tr("The text model stopped at its output limit, so this text was not processed.");
                 if (!detail.isEmpty()) err = detail;
             }
             cb(false, {}, {}, err);

@@ -83,6 +83,7 @@ void TextProcessor::dispatchPending() {
             pendingOriginal_ = pendingOriginal_.isEmpty() ? original : original + " " + pendingOriginal_;
             emit pendingChanged(pendingOriginal_);
             emit failed(err);
+            emit processingFailed(original, err);
             maybeFinishAfterFlight();
             return;
         }
