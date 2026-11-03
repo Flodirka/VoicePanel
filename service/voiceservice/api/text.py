@@ -75,13 +75,20 @@ async def process_text(
             " 'No changes needed' after the divider."
         )
 
+    # Without a client limit a repetition loop would generate until the context
+    # is full: minutes of CPU time while the dictation queue waits behind it.
+    # The derived cap is generous (see default_max_tokens) and applies only
+    # when the client sent no max_tokens.
+    derived_cap = req.max_tokens is None
+    max_tokens = req.max_tokens if not derived_cap else default_max_tokens(req.text, explain=req.explain)
+
     started = time.perf_counter()
     try:
         async with registry._llm_semaphore:
             data = await registry.llm.complete(
                 messages,
                 temperature=req.temperature,
-                max_tokens=req.max_tokens,
+                max_tokens=max_tokens,
                 # Qwen3.5 reasons before answering unless told otherwise: that
                 # put 20 s of thinking and an empty result behind every sentence.
                 chat_template_kwargs={"enable_thinking": False},
@@ -89,7 +96,13 @@ async def process_text(
     except Exception as exc:  # noqa: BLE001 - surfaced as 502 with detail
         raise HTTPException(502, f"text processing failed: {exc}")
 
-    content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+    choice = (data.get("choices") or [{}])[0]
+    content = choice.get("message", {}).get("content", "")
+    fallback = None
+    if derived_cap and choice.get("finish_reason") == "length":
+        # The model ran into the safety cap: its output is a loop or a cut-off
+        # rewrite. Return the input unchanged rather than lose dictated words.
+        content, fallback = req.text, "length"
     result, notes = content, ""
     if req.explain and "---" in content:
         result, _, notes = content.partition("---")
@@ -106,11 +119,23 @@ async def process_text(
             "original": req.text,
             "result": result,
             **({"notes": notes} if notes else {}),
+            **({"fallback": fallback} if fallback else {}),
             "model": registry.llm.model_alias,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "usage": data.get("usage"),
         }
     )
+
+
+def default_max_tokens(text: str, *, explain: bool = False) -> int:
+    """Generation cap used when a request does not set max_tokens.
+
+    Qwen-family tokenizers spend roughly 0.25 (English) to 0.5 (Russian) tokens
+    per character, and a correction or translation is about as long as its
+    input. Half the character count plus a fixed margin leaves at least twice
+    the expected length, including English-to-Russian expansion.
+    """
+    return len(text) // 2 + (384 if explain else 128)
 
 
 def _strip_wrapping_quotes(text: str) -> str:

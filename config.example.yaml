@@ -135,4 +135,13 @@ backends:
     gpu_layers: 0            # 0 = CPU only
     flash_attn: true
     threads: 8
+    # Host-RAM prompt cache (llama-server --cache-ram). llama.cpp's default is
+    # 8192 MiB; one dictation slot needs a few cached prompts at most. Set to
+    # null to keep the llama.cpp default.
+    cache_ram_mib: 512
+    # KV cache storage: unset keeps f16. q8_0 for both halves KV memory
+    # (about 0.56 GB less for this model at ctx_size 8192); measure quality
+    # with tools/bench before switching. V quantization needs flash_attn.
+    # cache_type_k: q8_0
+    # cache_type_v: q8_0
     idle_stop_s: 900         # stop the process after fifteen idle minutes

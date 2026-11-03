@@ -174,6 +174,13 @@ void ServiceClient::processText(const QString &text, const QString &mode,
     });
 }
 
+void ServiceClient::warmup(const QString &mode, const QString &profile) {
+    QJsonObject payload{{"mode", mode}, {"profile", profile}};
+    if (!context_.isEmpty()) payload.insert("context", context_);
+    postJson("/v1/warmup", QJsonDocument(payload).toJson(QJsonDocument::Compact),
+             [](bool, QByteArray, QString) {});
+}
+
 void ServiceClient::speech(const QString &text, const QString &model, const QString &voice,
                            double speed,
                            std::function<void(bool, QByteArray, QString)> cb, const QString &language) {

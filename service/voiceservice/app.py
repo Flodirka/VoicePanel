@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from . import __version__, compute
-from .api import admin, openai, sessions, text, voices
+from .api import admin, openai, sessions, text, voices, warmup
 from .backends import Registry
 from .config import load_config
 from .voices import VoiceStore
@@ -42,5 +42,6 @@ def create_app(config_path: str | Path | None = None) -> FastAPI:
     app.include_router(text.router)
     app.include_router(voices.router)
     app.include_router(sessions.router)
+    app.include_router(warmup.router)
     app.include_router(admin.router)
     return app

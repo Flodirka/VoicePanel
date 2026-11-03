@@ -603,6 +603,53 @@ private slots:
         QVERIFY(controller.sessionOpen_);
     }
 
+    void periodicSpeculationWaitsForTheSegmentToGrow() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        DictationController controller(&client);
+        controller.sessionOpen_ = controller.inSpeech_ = true;
+        controller.speechFrames_ = 200;
+        controller.revision_ = 200;
+        controller.lastSpeculateFrame_ = 160;      // last request covered 5.1 s
+        controller.segment_.fill(0.1f, 230 * Vad::kFrameSamples);
+        controller.maybeSpeculate();               // +70 frames: past the fixed 63, below 160 / 2
+        QVERIFY(!controller.speculateInFlight_);
+        controller.segment_.fill(0.1f, 240 * Vad::kFrameSamples);
+        controller.maybeSpeculate();               // +80 frames: half the last request
+        QVERIFY(controller.speculateInFlight_);
+        QTRY_COMPARE(server.requests.size(), 1);
+        controller.cancel();
+    }
+
+    void pauseSpeculationIsNotDelayedByTheGrowthRule() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        DictationController controller(&client);
+        controller.sessionOpen_ = controller.inSpeech_ = true;
+        controller.speechFrames_ = controller.revision_ = 200;
+        controller.lastSpeculateFrame_ = 200;
+        controller.silenceFrames_ = 6;             // pause candidate
+        controller.segment_.fill(0.1f, 206 * Vad::kFrameSamples);
+        controller.maybeSpeculate();
+        QTRY_COMPARE(server.requests.size(), 1);
+        controller.cancel();
+    }
+
+    void warmupCarriesModeAndContext() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        client.setContext("Glossary: UCLASS");
+        client.warmup("auto_correct", "general");
+        QTRY_COMPARE(server.requests.size(), 1);
+        const auto request = QJsonDocument::fromJson(server.requests[0]->property("body").toByteArray()).object();
+        QCOMPARE(request.value("mode").toString(), QString("auto_correct"));
+        QCOMPARE(request.value("context").toString(), QString("Glossary: UCLASS"));
+        server.reply(0, R"({"scheduled":["asr","llm"]})");
+    }
+
     void continuousCorrectionReachesPreviewBeforeStop() {
         TestServer server;
         app_->settings()->autoCleanEditor = true;

@@ -23,6 +23,12 @@ async def _post_with_retry(
         resp = await client.post(url, **kwargs)
         resp.raise_for_status()
         return resp
+    except httpx.RemoteProtocolError:
+        # A pooled keep-alive connection that the server closed between
+        # requests: the request never reached the model, so send it again.
+        resp = await client.post(url, **kwargs)
+        resp.raise_for_status()
+        return resp
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code not in _RETRY_STATUS:
             raise
@@ -119,36 +125,37 @@ class AudioCppBackend:
         timeout: float = 300.0,
     ) -> dict[str, Any]:
         """Returns {"text": str, ...}; audio must be 16 kHz mono PCM WAV."""
-        async with self.proc.lease() as lease:  # noqa: F841 - lease keeps process alive
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                data = {"model": model, "response_format": "json"}
-                if language:
-                    data["language"] = language
-                if prompt:
-                    data["prompt"] = prompt
-                resp = await _post_with_retry(
-                    client,
-                    f"{self.proc.base_url}/v1/audio/transcriptions",
-                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data=data,
-                )
-                return resp.json()
+        async with self.proc.lease():  # the lease keeps the process alive
+            data = {"model": model, "response_format": "json"}
+            if language:
+                data["language"] = language
+            if prompt:
+                data["prompt"] = prompt
+            resp = await _post_with_retry(
+                self.proc.http(),
+                f"{self.proc.base_url}/v1/audio/transcriptions",
+                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                data=data,
+                timeout=timeout,
+            )
+            return resp.json()
+
     async def transcribe_detailed(
         self, wav_bytes: bytes, *, model: str, language: str | None = None, timeout: float = 300.0
     ) -> dict[str, Any]:
         """Word-level detail variant when the model family supports it."""
         async with self.proc.lease():
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                data = {"model": model}
-                if language:
-                    data["language"] = language
-                resp = await _post_with_retry(
-                    client,
-                    f"{self.proc.base_url}/v1/audio/transcriptions/details",
-                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data=data,
-                )
-                return resp.json()
+            data = {"model": model}
+            if language:
+                data["language"] = language
+            resp = await _post_with_retry(
+                self.proc.http(),
+                f"{self.proc.base_url}/v1/audio/transcriptions/details",
+                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                data=data,
+                timeout=timeout,
+            )
+            return resp.json()
 
     # ------------------------------------------------------------------ TTS
     async def speech(
@@ -162,27 +169,25 @@ class AudioCppBackend:
         timeout: float = 300.0,
     ) -> bytes:
         async with self.proc.lease():
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                payload: dict[str, Any] = {"model": model, "input": text, "response_format": "wav"}
-                if voice:
-                    payload["voice"] = voice
-                if speed is not None:
-                    payload["speed"] = speed
-                if language:
-                    payload["language"] = language
-                resp = await _post_with_retry(
-                    client, f"{self.proc.base_url}/v1/audio/speech", json=payload
-                )
-                return resp.content
+            payload: dict[str, Any] = {"model": model, "input": text, "response_format": "wav"}
+            if voice:
+                payload["voice"] = voice
+            if speed is not None:
+                payload["speed"] = speed
+            if language:
+                payload["language"] = language
+            resp = await _post_with_retry(
+                self.proc.http(), f"{self.proc.base_url}/v1/audio/speech", json=payload, timeout=timeout
+            )
+            return resp.content
 
     async def loaded_models(self) -> list[dict[str, Any]]:
         if not self.proc.running:
             return []
         try:
-            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
-                resp = await client.get(f"{self.proc.base_url}/v1/models")
-                resp.raise_for_status()
-                return resp.json().get("data", [])
+            resp = await self.proc.http().get(f"{self.proc.base_url}/v1/models", timeout=5.0)
+            resp.raise_for_status()
+            return resp.json().get("data", [])
         except httpx.HTTPError:
             return []
 

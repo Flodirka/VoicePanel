@@ -122,18 +122,27 @@ def build_messages(
     # and the context document, as the user asked. The user message is the text
     # and nothing else. `previous` is gone: feeding the model its own last output
     # made it repeat whole paragraphs.
-    parts = [SYSTEM_BASE, "", f"Task: {task}", ""]
+    #
+    # Order matters for speed: llama-server reuses the KV cache of the longest
+    # prefix shared with the previous request. Parts that stay the same for a
+    # whole session (rules, profile, terminology, context document) come first;
+    # parts that change per request (the task, which follows the language of
+    # each sentence in auto mode, and spell-checker hints) come last. Then a
+    # switch between correct_ru and correct_en re-evaluates only the task line,
+    # not the whole context document.
+    parts = [SYSTEM_BASE, ""]
     profile_text = PROFILES.get(profile)
     if profile_text:
         parts.append(f"Context domain: {profile_text}")
     if dictionary:
         parts.append("User terminology (prefer these renderings): " + "; ".join(dictionary[:200]))
+    if context:
+        parts.append(context)
+    parts += ["", f"Task: {task}"]
     if spelling:
         section = _spelling_section(spelling)
         if section:
             parts.append(section)
-    if context:
-        parts.append(context)
     system = "\n".join(parts)
     return [
         {"role": "system", "content": system},

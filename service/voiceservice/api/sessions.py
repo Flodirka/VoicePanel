@@ -78,11 +78,13 @@ async def dictation_session(ws: WebSocket) -> None:
         except Exception:
             pass
 
+    min_speech_frames = int(cfg.get("min_speech_frames", 6))
     live = LiveTranscription(
         asr_request,
         preview,
         speech_threshold=float(cfg.get("speech_threshold", 0.5)),
         preroll_frames=int(cfg.get("preroll_frames", 11)),
+        min_speech_frames=min_speech_frames,
         speculate_every_frames=int(cfg.get("speculate_every_frames", 63)),
         speculative=bool(cfg.get("speculative", True)),
     )
@@ -90,19 +92,50 @@ async def dictation_session(ws: WebSocket) -> None:
     speech_start_s: float | None = None
     buffer = np.zeros(0, dtype=np.float32)
     max_utterance_s = float(cfg.get("max_utterance_s", 30.0))
-    min_speech_frames = int(cfg.get("min_speech_frames", 6))
     silence_frames_needed = int(cfg.get("silence_frames", 24))
 
+    # Finals are recognised in the background so audio intake and VAD keep
+    # running while an utterance is transcribed. A chain of sender tasks keeps
+    # the final events in utterance order.
+    last_sender: asyncio.Task | None = None
+    pending: set[asyncio.Task] = set()
+
+    def _track(task: asyncio.Task) -> asyncio.Task:
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+        return task
+
     async def finalize(segment) -> None:
-        nonlocal speech_start_s
+        nonlocal speech_start_s, last_sender
         if segment is None:
             return
-        text = await live.finish(segment)
         speech_start_s = None
-        try:
-            await ws.send_json({"type": "final", "text": text, "t_offset_s": t_offset()})
-        except Exception:
-            pass
+        recognition = _track(asyncio.create_task(live.finish(segment)))
+        previous = last_sender
+
+        async def send_in_order() -> None:
+            if previous is not None:
+                await previous
+            try:
+                text = await recognition
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - reported, the session continues
+                try:
+                    await ws.send_json({"type": "error", "message": f"transcription failed: {exc}"})
+                except Exception:
+                    pass
+                return
+            try:
+                await ws.send_json({"type": "final", "text": text, "t_offset_s": t_offset()})
+            except Exception:
+                pass
+
+        last_sender = _track(asyncio.create_task(send_in_order()))
+
+    async def drain_finals() -> None:
+        if last_sender is not None:
+            await last_sender
 
     async def process_frame(frame: np.ndarray) -> None:
         nonlocal speech_start_s, buffer
@@ -177,9 +210,12 @@ async def dictation_session(ws: WebSocket) -> None:
                     if live.current is not None:
                         ended = live.speech_ended()
                         await finalize(ended)
+                    await drain_finals()
                     await ws.send_json({"type": "done"})
                     break
                 elif mtype == "cancel":
+                    for task in list(pending):
+                        task.cancel()
                     live.reset()
                     vad.reset()
                     await ws.send_json({"type": "done"})
@@ -194,4 +230,6 @@ async def dictation_session(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        for task in list(pending):
+            task.cancel()
         live.reset()

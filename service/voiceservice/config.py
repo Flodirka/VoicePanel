@@ -145,6 +145,11 @@ DEFAULTS: dict[str, Any] = {
             "gpu_layers": 0,
             "flash_attn": True,
             "threads": 8,
+            # llama-server keeps old prompt states in a host-RAM cache that
+            # defaults to 8192 MiB. One dictation slot needs a few at most.
+            "cache_ram_mib": 512,
+            "cache_type_k": None,      # None = llama.cpp default (f16); q8_0 halves KV memory
+            "cache_type_v": None,
             "start_timeout_s": 180,
             "idle_stop_s": 900,
             "extra_args": [],

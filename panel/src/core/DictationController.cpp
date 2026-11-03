@@ -145,7 +145,12 @@ void DictationController::maybeSpeculate() {
     if (!params_.speculative || !inSpeech_ || speculateInFlight_ || stopping_ || requestedRevision_ == revision_) return;
     const int framesSinceLast = segment_.size() / kFrame - lastSpeculateFrame_;
     const bool pauseCandidate = silenceFrames_ >= 6;
-    if (!pauseCandidate && framesSinceLast < params_.speculateEveryFrames) return;
+    // Each speculation re-recognises the whole segment. A periodic one waits
+    // until the segment has grown by half since the last request, so the
+    // preview work stays linear in utterance length (service vad.py has the
+    // same rule). Pause speculation, which feeds the final, is unchanged.
+    const int periodicInterval = qMax(params_.speculateEveryFrames, lastSpeculateFrame_ / 2);
+    if (!pauseCandidate && framesSinceLast < periodicInterval) return;
     if (speechFrames_ < params_.minSpeechFrames) return;
     launchSpeculative();
 }

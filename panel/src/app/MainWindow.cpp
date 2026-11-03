@@ -504,6 +504,11 @@ void MainWindow::startDictation(bool reviewMode) {
     app_->dictation()->setParams(params);
     app_->dictation()->setInputDevice(settings->inputDevice);
     if (!app_->dictation()->start()) { updateActions(); return; }
+    // The first utterance ends a second or more from now: load the models it
+    // needs in that window instead of after it.
+    app_->service()->warmup(settings->autoTranslate ? "auto_translate"
+                            : settings->autoCleanEditor ? "auto_correct" : "dictation",
+                            "general");
     recording_ = sessionActive_ = true;
     statusLabel_->setText(tr("Listening…"));
     processingLabel_->setText(target_.isValid() ? tr("Target: %1").arg(target_.windowTitle)

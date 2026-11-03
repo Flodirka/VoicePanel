@@ -60,6 +60,9 @@ class Registry:
         self._asr_lock = asyncio.Lock()
         self._tts_lock = asyncio.Lock()
         self._llm_semaphore = asyncio.Semaphore(4)
+        # Session warm-up (api/warmup.py): kinds in progress and their tasks.
+        self.warming: set[str] = set()
+        self.background_tasks: set[asyncio.Task] = set()
 
     @property
     def llm(self) -> LlamaBackend | None:

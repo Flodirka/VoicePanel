@@ -8,6 +8,7 @@ requests whose result is reused when the final revision matches.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,20 @@ from pathlib import Path
 import numpy as np
 
 FRAME_SAMPLES = 512  # Silero v5 frame size at 16 kHz (32 ms)
+
+
+def speculation_interval(last_request_frames: int, every_frames: int) -> int:
+    """Frames of new audio required before the next periodic speculation.
+
+    Each speculation re-recognises the whole segment from its start. With a
+    fixed interval the total work grows quadratically with utterance length:
+    simulated at 5x real-time ASR, one 20 s utterance re-recognises 74 s of
+    audio, and 35 s when the segment must grow by half between requests.
+    Utterances under about 12 s and slower ASR are unchanged, because a
+    request in flight already blocks the next one. Pause speculation is not
+    affected.
+    """
+    return max(every_frames, last_request_frames // 2)
 
 
 class SileroVAD:
@@ -113,6 +128,10 @@ class LiveTranscription:
         if probability >= self.speech_threshold:
             segment.revision += 1
             segment.quiet = 0
+            # revision starts at 1, so it counts speech frames + 1. Speculation
+            # starts once the segment is real speech, not a click.
+            if segment.revision > self.min_speech_frames:
+                segment.confirmed = True
         else:
             segment.quiet += 1
 
@@ -136,7 +155,13 @@ class LiveTranscription:
             return False
         if segment.task is not None and not segment.task.done():
             return False
-        return segment.quiet >= 6 or (len(segment.frames) - segment.last_request) >= self.speculate_every_frames
+        if segment.requested == segment.revision:
+            return False   # no new speech since the last request: same answer
+        return segment.quiet >= 6 or (
+            len(segment.frames) - segment.last_request >= speculation_interval(
+                segment.last_request, self.speculate_every_frames
+            )
+        )
 
     def launch_speculative(self, segment: Segment) -> None:
         revision = segment.revision
@@ -153,7 +178,9 @@ class LiveTranscription:
             segment.result_text = text
             segment.result_revision = revision
             if self.current is segment:
-                self.preview(text or "")
+                shown = self.preview(text or "")
+                if inspect.isawaitable(shown):
+                    await shown
 
         segment.task = asyncio.create_task(run())
 

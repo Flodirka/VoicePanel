@@ -39,6 +39,10 @@ public:
     void processText(const QString &text, const QString &mode, const QString &profile,
                      const QString &previous, const QList<SpellingHint> &spelling,
                      std::function<void(bool ok, QString result, QString notes, QString error)> cb);
+    // Fire-and-forget: ask the service to load the recognition model and
+    // prefill the text model's prompt while the user starts speaking. A service
+    // without /v1/warmup answers 404, which is ignored.
+    void warmup(const QString &mode, const QString &profile);
     // TTS -> WAV bytes
     void speech(const QString &text, const QString &model, const QString &voice, double speed,
                 std::function<void(bool ok, QByteArray wav, QString error)> cb,

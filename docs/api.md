@@ -73,6 +73,18 @@ Optional fields are `dictionary` (string list), `context` (string), `previous` (
 
 The response includes `mode`, `profile`, `original`, `result` and `model`. Model-backed results also include processing duration and available usage data. Explanation requests can include `notes`. Plain `dictation` returns the text without calling an LLM.
 
+When `max_tokens` is omitted or null, the service limits generation to half the input length in characters plus 128 tokens (plus 384 with `explain`). This is at least twice the expected output. If the model reaches that limit, the output is a loop or a cut-off rewrite: the response returns the original text as `result` and adds `"fallback": "length"`. An explicit `max_tokens` keeps the previous behavior and returns whatever the model generated.
+
+## Session warm-up
+
+`POST /v1/warmup` prepares the models a dictation session is about to use and answers `202` at once:
+
+```json
+{"asr":true,"llm":true,"mode":"auto_correct","profile":"general","context":"..."}
+```
+
+All fields are optional. `mode` accepts the text modes above plus `auto_correct` and `auto_translate`; `dictation` or no mode skips the text model. The service loads the configured ASR model if it is not resident, and sends a one-token request with the session's system prompt to the local text server, so the first sentence reuses that prompt prefix. The response lists the scheduled parts in `scheduled`. Nothing runs for a resident ASR model, for a warm-up already in progress, or for an external text server (`backends.llama.external: true`), whose slots belong to another application. The panel calls this route when a dictation session starts; older services answer `404`, which the panel ignores.
+
 ## Chat completions
 
 `POST /v1/chat/completions` forwards the JSON request to the configured text server. The gateway maps `model` to its served model alias. `stream: true` returns server-sent events. An external text server receives the corresponding text and context.
@@ -88,7 +100,7 @@ JSON controls are:
 - `{"type":"finish"}` finalizes remaining audio and ends the session.
 - `{"type":"cancel"}` discards pending session state and ends it.
 
-Events include `ready`, `config_applied`, `speech_started`, `partial`, `final`, `error` and `done`. Transcript events contain `text` and an elapsed `t_offset_s`. The server-side stream is separate from the Qt panel's capture/controller implementation. It does not transmit voice messages to another application.
+Events include `ready`, `config_applied`, `speech_started`, `partial`, `final`, `error` and `done`. Transcript events contain `text` and an elapsed `t_offset_s`. Audio intake continues while an ended utterance is recognized; `final` events keep utterance order, and `finish` sends `done` after the last `final`. A failed recognition sends an `error` event and the session continues. With `sessions.speculative: true`, `partial` events start once an utterance has `min_speech_frames` speech frames. The server-side stream is separate from the Qt panel's capture/controller implementation. It does not transmit voice messages to another application.
 
 ## Administration
 
