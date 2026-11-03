@@ -1,4 +1,5 @@
 #include "core/TextProcessor.h"
+#include "core/TimingLog.h"
 #include <QPointer>
 
 using namespace VoicePanel;
@@ -33,6 +34,7 @@ QPair<QString, QString> TextProcessor::splitCompletePrefix(const QString &text) 
 
 void TextProcessor::acceptFinal(const QString &finalText) {
     if (mode_ == "dictation" && !autoTranslate_) {
+        TimingLog::event("text_result", {{"chars", int(finalText.size())}, {"llm", false}});
         emit processedBatch(finalText, finalText);
         return;
     }
@@ -72,6 +74,7 @@ void TextProcessor::dispatchPending() {
     const QString profile = profile_;
     const quint64 generation = generation_;
     QPointer<TextProcessor> self(this);
+    TimingLog::event("text_request", {{"chars", int(original.size())}, {"mode", mode}});
     service_->processText(original, mode, profile, previous, {},
                           [this, self, generation, original](bool ok, QString result, QString notes, QString err) mutable {
         if (!self || generation != generation_) return;
@@ -82,12 +85,14 @@ void TextProcessor::dispatchPending() {
             // keep the text for a later retry; never lose user content
             pendingOriginal_ = pendingOriginal_.isEmpty() ? original : original + " " + pendingOriginal_;
             emit pendingChanged(pendingOriginal_);
+            TimingLog::event("text_failed", {{"chars", int(original.size())}});
             emit failed(err);
             emit processingFailed(original, err);
             maybeFinishAfterFlight();
             return;
         }
         lastProcessedResult_ = result;
+        TimingLog::event("text_result", {{"chars", int(original.size())}});
         emit pendingChanged(pendingOriginal_);
         emit processedBatch(original, result);
         if (!notes.isEmpty()) emit failed(tr("Correction notes: %1").arg(notes));  // info channel

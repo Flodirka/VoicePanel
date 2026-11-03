@@ -86,6 +86,7 @@ private:
     QString speculativeText_;
     bool speculateInFlight_ = false;
     qint64 segmentStartedMs_ = 0;
+    qint64 lastSpeechMs_ = 0;        // TimingLog clock, only kept while logging
     static constexpr int kFrame = Vad::kFrameSamples;
     quint64 generation_ = 0;
     int segmentId_ = 0;

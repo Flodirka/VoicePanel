@@ -1,5 +1,6 @@
 """Reproducible VoicePanel benchmark: ASR, correction, translation, TTS and
-end-to-end latency with process resource sampling.
+request-level latency with process resource sampling. User-facing latency
+(speech end to inserted text) is measured in the panel: tools/bench/panel_timing.py.
 
 Run it against a started service (tools/start-service.ps1). Results go to
 runtime/logs/bench/<timestamp>-<suite>.json and a short summary is printed.
@@ -10,14 +11,17 @@ Suites:
   text   correction or translation through the service or straight to an
          OpenAI-compatible llama-server (A/B of candidate models).
   asr    WER/CER, latency and real-time factor from a JSONL manifest.
-  e2e    speech end -> processed text: ASR, then correction or translation.
+  chain  request-level chain: one ASR request, then one text request (not
+         user-facing end-to-end latency; see tools/bench/panel_timing.py).
+  prefix KV prefix reuse from llama-server timings: prompt order before and
+         after the audit, and the first request with and without warm-up.
   tts    time to complete WAV and real-time factor.
 
 Examples (PowerShell, from the repository root):
   python tools/bench/run_bench.py text --suite correction --repeat 3
   python tools/bench/run_bench.py text --suite translation --llm-url http://127.0.0.1:8110 --template hy-mt2
   python tools/bench/run_bench.py asr --manifest runtime/bench/asr.jsonl --model qwen3-asr
-  python tools/bench/run_bench.py e2e --manifest runtime/bench/asr.jsonl --cold
+  python tools/bench/run_bench.py chain --manifest runtime/bench/asr.jsonl --cold
   python tools/bench/run_bench.py tts --voice my-profile
 
 Every llama-server, audiocpp_server and whisper-server process is sampled and
@@ -221,14 +225,28 @@ class ServiceText:
         resp.raise_for_status()
         return resp.json()["result"]
 
+    def try_run(self, text: str, mode: str, context: str | None) -> dict[str, Any]:
+        """Like run(), but a failed request is a result: {"error", "status", "reason"}."""
+        try:
+            return {"result": self.run(text, mode, context)}
+        except httpx.HTTPStatusError as exc:
+            try:
+                body = exc.response.json()
+            except ValueError:
+                body = {}
+            return {"error": str(body.get("detail") or exc)[:300], "status": exc.response.status_code,
+                    "reason": body.get("reason")}
+
 
 class DirectLlm:
     """An OpenAI-compatible llama-server started by hand with a candidate model.
 
     Templates:
-      voicepanel  the service's own system prompt (processing.build_messages)
-      hy-mt2      Tencent Hy-MT2 user-only prompt, glossary as reference pairs
-      custom      --user-template file with {text}, {target_lang}, {context}
+      voicepanel         the service's system prompt (processing.build_messages)
+      voicepanel-legacy  the same parts in the order used before the audit
+                         (task before profile and context): A/B of the order
+      hy-mt2             Tencent Hy-MT2 user-only prompt, glossary as pairs
+      custom             --user-template file with {text}, {target_lang}, {context}
     """
 
     def __init__(self, url: str, template: str, sampling: dict[str, Any], user_template: str | None) -> None:
@@ -240,6 +258,8 @@ class DirectLlm:
             from voiceservice.processing import build_messages
 
             return build_messages(text, mode, context=context)
+        if self.template == "voicepanel-legacy":
+            return legacy_build_messages(text, mode, context=context)
         target = LANG_NAMES["en" if mode.endswith("_en") else "ru"]
         if self.template == "hy-mt2":
             prompt = ""
@@ -252,12 +272,49 @@ class DirectLlm:
         template = self.user_template or "{text}"
         return [{"role": "user", "content": template.format(text=text, target_lang=target, context=context or "")}]
 
-    def run(self, text: str, mode: str, context: str | None, glossary=None) -> str:
+    def try_run(self, text: str, mode: str, context: str | None, glossary=None) -> dict[str, Any]:
+        """{"result", "prompt_n", "cache_n", "finish_reason"} or {"error", ...}.
+
+        prompt_n and cache_n come from llama-server's "timings": prompt tokens
+        evaluated and prompt tokens reused from the KV cache."""
+        from voiceservice.api.text import default_max_tokens
+
         payload = {"messages": self.messages(text, mode, context, glossary), "stream": False,
-                   "max_tokens": len(text) // 2 + 128, **self.sampling}
-        resp = self.client.post("/v1/chat/completions", json=payload)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+                   "max_tokens": default_max_tokens(text), **self.sampling}
+        try:
+            resp = self.client.post("/v1/chat/completions", json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            return {"error": str(exc)[:300]}
+        data = resp.json()
+        choice = data["choices"][0]
+        timings = data.get("timings") or {}
+        out = {"result": choice["message"]["content"].strip(), "finish_reason": choice.get("finish_reason"),
+               "prompt_n": timings.get("prompt_n"), "cache_n": timings.get("cache_n")}
+        if choice.get("finish_reason") == "length":
+            # same rule as the service: a capped output is a failure, not a result
+            out = {"error": "generation_limit", "reason": "generation_limit",
+                   "prompt_n": out["prompt_n"], "cache_n": out["cache_n"]}
+        return out
+
+    def evict(self) -> None:
+        """Replace the slot's cached prompt with an unrelated one."""
+        self.client.post("/v1/chat/completions", json={
+            "messages": [{"role": "system", "content": "Benchmark cache reset."},
+                         {"role": "user", "content": "Reply OK."}], "max_tokens": 1, "temperature": 0.0})
+
+
+def legacy_build_messages(text: str, mode: str, context: str | None = None) -> list[dict[str, str]]:
+    """processing.build_messages as it was before the audit (commit cf3cc64):
+    the task line came before the profile, terminology and context document.
+    Kept here only for the local A/B of the prompt order."""
+    from voiceservice.processing import MODE_PROMPTS, PROFILES, SYSTEM_BASE
+
+    parts = [SYSTEM_BASE, "", f"Task: {MODE_PROMPTS[mode]}", ""]
+    parts.append(f"Context domain: {PROFILES['general']}")
+    if context:
+        parts.append(context)
+    return [{"role": "system", "content": "\n".join(parts)}, {"role": "user", "content": text}]
 
 
 # -------------------------------------------------------------------- suites
@@ -276,14 +333,19 @@ def suite_text(args, client: httpx.Client) -> dict[str, Any]:
             else:
                 mode = f"translate_{case['source']}_{case['target']}"
             context = case.get("context") or args.context
-            call = (lambda: backend.run(case["input"], mode, context, case.get("glossary"))) \
-                if isinstance(backend, DirectLlm) else (lambda: backend.run(case["input"], mode, context))
-            ms, output = timed(call)
+            call = (lambda: backend.try_run(case["input"], mode, context, case.get("glossary"))) \
+                if isinstance(backend, DirectLlm) else (lambda: backend.try_run(case["input"], mode, context))
+            ms, outcome = timed(call)
+            if "error" in outcome:
+                rows.append({"id": case["id"], "rep": rep, "ms": round(ms, 1), **outcome})
+                continue
+            output = outcome["result"]
             if rep > 0 or not args.discard_first:
                 latencies.append(ms)
             kept, total, missing = preserved(case.get("protect", []), output)
             row = {"id": case["id"], "rep": rep, "ms": round(ms, 1), "output": output,
-                   "protected_kept": kept, "protected_total": total, "missing": missing}
+                   "protected_kept": kept, "protected_total": total, "missing": missing,
+                   **{k: outcome[k] for k in ("prompt_n", "cache_n") if outcome.get(k) is not None}}
             if args.suite == "correction":
                 row["changed_unchanged_input"] = case["kind"] == "unchanged" and output.strip() != case["input"].strip()
                 row["edit_vs_expected"] = round(edit_ratio(case["expected"], output), 3)
@@ -295,8 +357,12 @@ def suite_text(args, client: httpx.Client) -> dict[str, Any]:
                 row["target_script_share"] = round(script_share(output, case["target"]), 2)
                 row["required_missing"] = [t for t in case.get("require", []) if t.lower() not in output.lower()]
             rows.append(row)
-    final = [r for r in rows if r["rep"] == args.repeat - 1]
-    out: dict[str, Any] = {"latency_ms": summary(latencies), "cases": rows}
+    failed = [r for r in rows if "error" in r]
+    final = [r for r in rows if r["rep"] == args.repeat - 1 and "error" not in r]
+    out: dict[str, Any] = {"measurement": "request", "latency_ms": summary(latencies),
+                           "failures": len(failed), "cases": rows}
+    if not final:
+        return out
     kept = sum(r["protected_kept"] for r in final)
     total = sum(r["protected_total"] for r in final) or 1
     out["protected_token_rate"] = round(kept / total, 3)
@@ -384,12 +450,30 @@ def _partials(client, data: bytes, duration: float, args, final_text: str) -> di
     return {"first_partial_s": first, "stability": sum(stabilities) / len(stabilities) if stabilities else 1.0}
 
 
-def suite_e2e(args, client: httpx.Client) -> dict[str, Any]:
-    """Speech end -> processed text, as the panel sees it after the VAD pause:
-    final ASR on the utterance, then correction or translation."""
+# Panel defaults (panel/src/core/DictationController.h): a segment ends after
+# silence_frames quiet 32 ms frames; the speculative request that usually
+# becomes the final starts after PAUSE_FRAMES quiet frames.
+FRAME_MS = 32.0
+PAUSE_FRAMES = 6
+
+
+def estimate_speech_end_to_text_ms(asr_ms: float, text_ms: float, silence_frames: int,
+                                   pause_frames: int = PAUSE_FRAMES) -> float:
+    """Model estimate, not a measurement. Assumes the pause speculation is
+    reused as the final (no speech after the pause) and an idle text queue:
+    final = max(VAD end decision, pause speculation start + ASR), then text.
+    Excludes capture buffering, GUI scheduling and insertion."""
+    return max(silence_frames * FRAME_MS, pause_frames * FRAME_MS + asr_ms) + text_ms
+
+
+def suite_chain(args, client: httpx.Client) -> dict[str, Any]:
+    """Request-level chain: one ASR request for the whole utterance, then one
+    text request, measured at the client. This is inference plus HTTP time,
+    not the latency a user sees: see the "scope" field of the result."""
     manifest = load_jsonl(Path(args.manifest))
     base = Path(args.manifest).parent
-    rows, totals, asr_ms, llm_ms = [], [], [], []
+    rows, totals, asr_ms, text_ms, estimates = [], [], [], [], []
+    failures = 0
     for rep in range(args.repeat):
         for item in manifest:
             if args.cold:
@@ -403,15 +487,89 @@ def suite_e2e(args, client: httpx.Client) -> dict[str, Any]:
             t_asr, text = timed(lambda: _transcribe(client, data, args.model, args.prompt))
             mode = (("translate_ru_en" if has_cyrillic(text) else "translate_en_ru") if args.translate
                     else ("correct_ru" if has_cyrillic(text) else "correct_en"))
-            t_llm, result = timed(lambda: ServiceText(client, args.profile, args.temperature).run(text, mode, args.context)) \
-                if text.strip() else (0.0, "")
-            if rep > 0 or not args.discard_first or args.cold:
-                totals.append(t_asr + t_llm); asr_ms.append(t_asr); llm_ms.append(t_llm)
-            rows.append({"audio": item["audio"], "rep": rep, "asr_ms": round(t_asr, 1), "text_ms": round(t_llm, 1),
-                         "transcript": text, "result": result, "wer": round(wer(item["text"], text), 4)})
-    return {"speech_end_to_text_ms": summary(totals), "asr_ms": summary(asr_ms), "text_ms": summary(llm_ms),
-            "note": "Excludes the VAD end-of-speech wait (sessions.silence_frames x 32 ms) and insertion.",
-            "cases": rows}
+            outcome = ServiceText(client, args.profile, args.temperature)
+            t_text, result = timed(lambda: outcome.try_run(text, mode, args.context)) if text.strip() else (0.0, {"result": ""})
+            row = {"audio": item["audio"], "rep": rep, "asr_request_ms": round(t_asr, 1),
+                   "text_request_ms": round(t_text, 1), "asr_plus_text_request_ms": round(t_asr + t_text, 1),
+                   "transcript": text, "wer": round(wer(item["text"], text), 4), **result}
+            if "error" in result:
+                failures += 1
+            elif rep > 0 or not args.discard_first or args.cold:
+                totals.append(t_asr + t_text); asr_ms.append(t_asr); text_ms.append(t_text)
+                estimates.append(estimate_speech_end_to_text_ms(t_asr, t_text, args.silence_frames))
+                row["estimated_speech_end_to_text_ms"] = round(estimates[-1], 1)
+            rows.append(row)
+    return {
+        "measurement": "request",
+        "scope": ("Client-side wall time of one ASR request for the whole utterance plus one text request. "
+                  "Excludes the VAD end-of-speech wait, overlap with speculative recognition, capture "
+                  "buffering, GUI scheduling and insertion into the target application."),
+        "asr_plus_text_request_ms": summary(totals),
+        "asr_request_ms": summary(asr_ms),
+        "text_request_ms": summary(text_ms),
+        "text_failures": failures,
+        "estimate": {
+            "kind": "model estimate, not measured",
+            "estimated_speech_end_to_text_ms": summary(estimates),
+            "formula": "max(silence_frames * 32, 6 * 32 + asr_request_ms) + text_request_ms",
+            "silence_frames": args.silence_frames,
+            "assumes": "pause speculation reused as the final; text queue idle",
+        },
+        "cases": rows,
+    }
+
+
+# Alternating languages: in auto mode each switch changes the task line.
+PREFIX_SENTENCES = [
+    "нам нужно исправить эта ошибка в инвентаре",
+    "this are a test of the new build system",
+    "когда игрок умирает мы показываем экран поражения",
+    "we need to check there inventory system before release",
+    "открой блюпринт BP_PlayerCharacter и найди ивент BeginPlay",
+    "call get_node with the path player/sprite and then call queue_free",
+]
+
+
+def suite_prefix(args, client: httpx.Client) -> dict[str, Any]:
+    """KV prefix reuse as llama-server reports it (timings.prompt_n / cache_n).
+
+    1. The same alternating RU/EN correction sequence with the prompt order
+       before the audit ("legacy") and the current order ("current").
+    2. The first request after a cache reset, without and with POST /v1/warmup.
+    Talks to the service's own llama-server (default port 8103) directly; the
+    service must be running so /v1/warmup can be called. llama-server's
+    host-RAM prompt cache (--cache-ram) can restore an evicted prefix, which
+    shows up as cache_n > 0 without a warm-up.
+    """
+    context = args.context or (ROOT / "panel" / "resources" / "default-context.md").read_text(encoding="utf-8")
+    llm = DirectLlm(args.llm_url or "http://127.0.0.1:8103", "voicepanel", {"temperature": 0.0}, None)
+    out: dict[str, Any] = {"measurement": "llama-server timings: prompt_n evaluated, cache_n reused"}
+    for order, template in (("legacy", "voicepanel-legacy"), ("current", "voicepanel")):
+        llm.template = template
+        llm.evict()
+        rows = []
+        for _ in range(args.repeat):
+            for text in PREFIX_SENTENCES:
+                mode = "correct_ru" if has_cyrillic(text) else "correct_en"
+                ms, outcome = timed(lambda: llm.try_run(text, mode, context))
+                rows.append({"mode": mode, "ms": round(ms, 1), **{k: outcome.get(k) for k in ("prompt_n", "cache_n", "error")}})
+        switched = [r["prompt_n"] for r in rows[1:] if r.get("prompt_n") is not None]
+        out[order] = {"prompt_n_after_language_switch": summary(switched),
+                      "latency_ms_after_language_switch": summary([r["ms"] for r in rows[1:]]),
+                      "cases": rows}
+    llm.template = "voicepanel"
+    first = PREFIX_SENTENCES[0]
+    warm: dict[str, Any] = {}
+    for label, use_warmup in (("without_warmup", False), ("with_warmup", True)):
+        llm.evict()
+        if use_warmup:
+            resp = client.post("/v1/warmup", json={"mode": "auto_correct", "context": context})
+            warm["warmup_status"] = resp.status_code
+            time.sleep(args.warmup_wait)
+        ms, outcome = timed(lambda: llm.try_run(first, "correct_ru", context))
+        warm[label] = {"ms": round(ms, 1), **{k: outcome.get(k) for k in ("prompt_n", "cache_n", "error")}}
+    out["first_request_after_reset"] = warm
+    return out
 
 
 def suite_tts(args, client: httpx.Client) -> dict[str, Any]:
@@ -458,7 +616,7 @@ def _read(path: str | None) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("suite_name", choices=["text", "asr", "e2e", "tts"])
+    parser.add_argument("suite_name", choices=["text", "asr", "chain", "prefix", "tts"])
     parser.add_argument("--base", default="http://127.0.0.1:8080")
     parser.add_argument("--suite", choices=["correction", "translation"], default="correction")
     parser.add_argument("--repeat", type=int, default=3)
@@ -466,10 +624,10 @@ def main() -> int:
                         help="exclude the first (cold) repetition from latency statistics")
     parser.add_argument("--profile", default="general")
     parser.add_argument("--temperature", type=float, default=None)
-    parser.add_argument("--context", default=None, help="context document text for text and e2e suites")
+    parser.add_argument("--context", default=None, help="context document text for text, chain and prefix suites")
     parser.add_argument("--context-file", default=None)
     parser.add_argument("--llm-url", default=None, help="OpenAI-compatible llama-server to test directly")
-    parser.add_argument("--template", choices=["voicepanel", "hy-mt2", "custom"], default="voicepanel")
+    parser.add_argument("--template", choices=["voicepanel", "voicepanel-legacy", "hy-mt2", "custom"], default="voicepanel")
     parser.add_argument("--user-template", default=None, help="file with {text}/{target_lang}/{context}")
     parser.add_argument("--sampling", default=None, help="e.g. temperature=0.7,top_p=0.6,top_k=20 (or JSON)")
     parser.add_argument("--manifest", default=None, help="JSONL: {\"audio\": \"x.wav\", \"text\": \"...\", \"tags\": [..]}")
@@ -477,10 +635,12 @@ def main() -> int:
     parser.add_argument("--prompt", default=None, help="ASR context prompt")
     parser.add_argument("--prompt-file", default=None, help="ASR context prompt from a file (the context document)")
     parser.add_argument("--prefix-step", type=float, default=0.0, help="seconds; >0 measures partial results")
-    parser.add_argument("--translate", action="store_true", help="e2e: translate instead of correct")
-    parser.add_argument("--cold", action="store_true", help="e2e: unload engines before every utterance")
-    parser.add_argument("--warmup", action="store_true", help="e2e: call /v1/warmup before every utterance")
+    parser.add_argument("--translate", action="store_true", help="chain: translate instead of correct")
+    parser.add_argument("--cold", action="store_true", help="chain: stop the engines before every utterance (process start + model load)")
+    parser.add_argument("--warmup", action="store_true", help="chain: call /v1/warmup before every utterance")
     parser.add_argument("--warmup-wait", type=float, default=1.5, help="seconds between warm-up and speech end")
+    parser.add_argument("--silence-frames", type=int, default=24,
+                        help="chain: the panel's silence_frames setting, used only for the estimate")
     parser.add_argument("--voice", default=None, help="tts: voice profile id (needed for Russian)")
     parser.add_argument("--tts-model", default="kokoro")
     parser.add_argument("--watch", action="append", default=[], help="extra process name to sample")
@@ -491,11 +651,11 @@ def main() -> int:
         args.context = Path(args.context_file).read_text(encoding="utf-8")
     if args.prompt_file:
         args.prompt = Path(args.prompt_file).read_text(encoding="utf-8")
-    if args.suite_name in ("asr", "e2e") and not args.manifest:
-        parser.error("--manifest is required for asr and e2e")
+    if args.suite_name in ("asr", "chain") and not args.manifest:
+        parser.error("--manifest is required for asr and chain")
 
     client = httpx.Client(base_url=args.base, timeout=600, trust_env=False)
-    suites = {"text": suite_text, "asr": suite_asr, "e2e": suite_e2e, "tts": suite_tts}
+    suites = {"text": suite_text, "asr": suite_asr, "chain": suite_chain, "prefix": suite_prefix, "tts": suite_tts}
     with ResourceSampler(list(SERVICE_PROCESSES) + args.watch) as sampler:
         started = time.time()
         result = suites[args.suite_name](args, client)

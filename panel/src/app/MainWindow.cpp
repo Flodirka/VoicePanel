@@ -8,6 +8,7 @@
 #include "core/ServiceClient.h"
 #include "core/Settings.h"
 #include "core/TextInserter.h"
+#include "core/TimingLog.h"
 #include "core/TextProcessor.h"
 #include <QActionGroup>
 #include <QApplication>
@@ -792,6 +793,8 @@ void MainWindow::insertResult(bool automatic) {
     if (insertedText_.isEmpty() && insertedEarlierDocument_) remaining.prepend(' ');
     const auto report = insertIntoTarget(target_, remaining);
     if (report.result == InsertResult::Ok || report.result == InsertResult::ClipboardFallback) {
+        TimingLog::event("inserted", {{"chars", int(remaining.size())}, {"automatic", automatic},
+                                      {"clipboard", report.result == InsertResult::ClipboardFallback}});
         insertedText_ = text;
         insertionFailed_ = false;
         processingLabel_->setText(tr("Inserted without submitting."));

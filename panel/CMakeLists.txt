@@ -32,6 +32,7 @@ set(PANEL_SOURCES
   src/core/Settings.cpp
   src/core/DictationController.cpp
   src/core/TextProcessor.cpp
+  src/core/TimingLog.cpp
   src/core/TextDiff.cpp
   src/core/SpellingChecker.cpp
   src/core/TtsPlayer.cpp
