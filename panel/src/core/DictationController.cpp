@@ -1,4 +1,5 @@
 #include "core/DictationController.h"
+#include "core/TimingLog.h"
 
 #include <QBuffer>
 #include <QDataStream>
@@ -59,6 +60,7 @@ bool DictationController::start() {
         emit error(tr("Could not start microphone capture"));
         return false;
     }
+    TimingLog::event("session_start");
     emit sessionStarted();
     return true;
 }
@@ -123,6 +125,7 @@ void DictationController::processBlock(const QVector<float> &samples) {
                 ++speechFrames_;
                 silenceFrames_ = 0;
                 ++revision_;
+                if (TimingLog::enabled()) lastSpeechMs_ = TimingLog::nowMs();
             } else {
                 ++silenceFrames_;
             }
@@ -145,7 +148,12 @@ void DictationController::maybeSpeculate() {
     if (!params_.speculative || !inSpeech_ || speculateInFlight_ || stopping_ || requestedRevision_ == revision_) return;
     const int framesSinceLast = segment_.size() / kFrame - lastSpeculateFrame_;
     const bool pauseCandidate = silenceFrames_ >= 6;
-    if (!pauseCandidate && framesSinceLast < params_.speculateEveryFrames) return;
+    // Each speculation re-recognises the whole segment. A periodic one waits
+    // until the segment has grown by half since the last request, so the
+    // preview work stays linear in utterance length (service vad.py has the
+    // same rule). Pause speculation, which feeds the final, is unchanged.
+    const int periodicInterval = qMax(params_.speculateEveryFrames, lastSpeculateFrame_ / 2);
+    if (!pauseCandidate && framesSinceLast < periodicInterval) return;
     if (speechFrames_ < params_.minSpeechFrames) return;
     launchSpeculative();
 }
@@ -208,6 +216,11 @@ void DictationController::finishSegment(bool emitFinal) {
 
     ++pendingFinals_;
     const double speechSeconds = double(segmentAudio.size()) / 16000.0;
+    // last_speech_ms: when the GUI thread processed the last frame above the
+    // speech threshold. It trails the acoustic end by the capture block
+    // (64 ms) plus the device period and VAD lag.
+    TimingLog::event("segment_end", {{"segment", index}, {"last_speech_ms", double(lastSpeechMs_)},
+                                     {"audio_s", speechSeconds}});
 
     if (specRevision == revision && !partialSoFar.trimmed().isEmpty()) {
         // speculation still covers the final state of the segment
@@ -243,6 +256,7 @@ void DictationController::deliverFinal(int index, const QString &text, double se
     while (finalResults_.contains(nextFinalId_)) {
         const int id = nextFinalId_++;
         const auto result = finalResults_.take(id);
+        TimingLog::event("final", {{"segment", id}, {"chars", int(result.first.size())}});
         if (!result.first.trimmed().isEmpty()) emit finalTranscript(result.first, result.second, id);
         else emit partialTranscript({}, id);
     }

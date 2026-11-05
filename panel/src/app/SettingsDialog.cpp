@@ -1,4 +1,37 @@
 #include "app/SettingsDialog.h"
+#include <QComboBox>
+
+namespace {
+
+// One place for model display names: the combo is rebuilt from /v1/models,
+// and a saved id that the service has not reported yet must still be shown.
+QString modelLabel(const QString &id) {
+    if (id == "qwen3-asr") return QStringLiteral("Qwen3-ASR (terminology, RU/EN)");
+    if (id == "parakeet") return QStringLiteral("Parakeet (faster, punctuates RU/EN)");
+    if (id == "nemotron") return QStringLiteral("Nemotron (fastest, EN punctuation)");
+    if (id == "whisper") return QStringLiteral("Whisper (timestamps)");
+    if (id == "kokoro") return QStringLiteral("Kokoro (English)");
+    if (id == "piper-ru") return QStringLiteral("Piper ruslan (Russian)");
+    if (id == "qwen3-tts-clone") return QStringLiteral("Qwen3-TTS clone (RU/EN)");
+    if (id == "chatterbox") return QStringLiteral("Chatterbox clone (multilingual)");
+    return id;
+}
+
+// Select `id`, adding it when the list has not caught up yet. Returns false
+// only for an empty id, which is never a valid choice.
+bool selectModel(QComboBox *box, const QString &id) {
+    if (id.isEmpty()) return false;
+    int index = box->findData(id);
+    if (index < 0) {
+        box->addItem(modelLabel(id), id);
+        index = box->count() - 1;
+    }
+    box->setCurrentIndex(index);
+    return true;
+}
+
+} // namespace
+
 
 #include "app/PanelApp.h"
 #include "app/UiKit.h"
@@ -238,8 +271,10 @@ void SettingsDialog::buildUi() {
     connForm->addRow(tr("Service URL"), serviceUrl_);
     asrModel_ = new QComboBox;
     asrModel_->addItem(tr("Service default"), "default");
-    asrModel_->addItem("Qwen3-ASR (fast, RU/EN)", "qwen3-asr");
-    asrModel_->addItem("Whisper (timestamps)", "whisper");
+    for (const QString &id : {QStringLiteral("qwen3-asr"), QStringLiteral("parakeet"),
+                             QStringLiteral("nemotron"), QStringLiteral("whisper")}) {
+        asrModel_->addItem(modelLabel(id), id);
+    }
     connForm->addRow(tr("Recognition model"), asrModel_);
     autoClean_ = new QCheckBox(tr("Correct completed sentences automatically"));
     autoClean_->setObjectName("autoCorrection");
@@ -509,15 +544,13 @@ void SettingsDialog::buildUi() {
     connect(app_->voices(), &VoiceProfiles::removed, this, [this](bool ok) {
         if (ok) voiceStatus_->setText(tr("Profile deleted."));
     });
-    connect(app_->voices(), &VoiceProfiles::previewReady, this,
-            [this](bool ok, const QString &pathOrError) {
-                if (!ok) {
-                    voiceStatus_->setText(tr("Preview failed: %1").arg(pathOrError));
-                    return;
-                }
-                voiceStatus_->setText(tr("Playing preview…"));
-                PlaySoundW(reinterpret_cast<LPCWSTR>(pathOrError.utf16()), nullptr,
-                           SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    connect(app_->tts(), &TtsPlayer::started, this,
+            [this]() { voiceStatus_->setText(tr("Playing preview…")); });
+    connect(app_->tts(), &TtsPlayer::finished, this,
+            [this]() { voiceStatus_->setText(tr("Ready")); });
+    connect(app_->tts(), &TtsPlayer::error, this,
+            [this](const QString &message) {
+                voiceStatus_->setText(tr("Preview failed: %1").arg(message));
             });
 }
 
@@ -526,7 +559,7 @@ void SettingsDialog::load() {
     selectedRussianVoice_ = s->ttsRussianVoice;
     selectedEnglishVoice_ = s->ttsEnglishVoice;
     serviceUrl_->setText(s->serviceUrl);
-    asrModel_->setCurrentIndex(asrModel_->findData(s->asrModel));
+    selectModel(asrModel_, s->asrModel);
     contextPath_->setText(s->contextDocument);
     context_->setPlainText(s->context);
     autoClean_->setChecked(s->autoCleanEditor);
@@ -573,22 +606,15 @@ void SettingsDialog::loadServiceModels() {
             if (cap == "asr") asr << id;
             else if (cap == "tts") tts << id;
         }
-        const auto label = [](const QString &id) {
-            if (id == "qwen3-asr") return QStringLiteral("Qwen3-ASR (fast, RU/EN)");
-            if (id == "whisper") return QStringLiteral("Whisper (timestamps)");
-            if (id == "kokoro") return QStringLiteral("Kokoro (English)");
-            if (id == "piper-ru") return QStringLiteral("Piper ruslan (Russian)");
-            if (id == "qwen3-tts-clone") return QStringLiteral("Qwen3-TTS clone (RU/EN)");
-            if (id == "chatterbox") return QStringLiteral("Chatterbox clone (multilingual)");
-            return id;
-        };
+        const auto label = [](const QString &id) { return modelLabel(id); };
         if (!asr.isEmpty()) {
             const QString keep = asrModel_->currentData().toString();
             asrModel_->clear();
             asrModel_->addItem(tr("Service default"), "default");
             for (const QString &id : asr) asrModel_->addItem(label(id), id);
-            const int idx = asrModel_->findData(keep);
-            asrModel_->setCurrentIndex(idx >= 0 ? idx : 0);
+            if (!selectModel(asrModel_, keep) && asrModel_->count() > 0) {
+                asrModel_->setCurrentIndex(0);
+            }
         }
         if (!tts.isEmpty()) {
             const QString keep = ttsModel_->currentData().toString();
@@ -596,8 +622,9 @@ void SettingsDialog::loadServiceModels() {
             ttsModel_->addItem(tr("Auto by language"), "auto");
             for (const QString &id : tts) ttsModel_->addItem(label(id), id);
             ttsModel_->addItem(tr("Cloned voice (profile below)"), "profile");
-            const int idx = ttsModel_->findData(keep);
-            ttsModel_->setCurrentIndex(idx >= 0 ? idx : 0);
+            if (!selectModel(ttsModel_, keep) && ttsModel_->count() > 0) {
+                ttsModel_->setCurrentIndex(0);
+            }
         }
     });
 }
@@ -724,8 +751,24 @@ void SettingsDialog::previewVoice() {
     const auto profiles = app_->voices()->profiles();
     const int row = voiceList_->currentRow();
     if (row < 0 || row >= profiles.size()) return;
-    const QString id = profiles[row].id;
-    app_->voices()->preview(id);
+    // Speak through the shared player instead of writing a WAV and handing it
+    // to PlaySound: the player is the path the rest of the app already uses, so
+    // a preview that works elsewhere works here too.
+    const VoiceProfile profile = profiles[row];
+    const bool russian = profile.language.startsWith(QLatin1String("ru"));
+    app_->tts()->setModel(QStringLiteral("auto"));
+    app_->tts()->setVoiceProfile(profile.id);
+    app_->tts()->setLanguageVoices(profile.id, profile.id);
+    app_->tts()->setSpeed(app_->settings()->ttsSpeed);
+    // A profile preview is about the voice, not about routing: play it on the
+    // default output even if a virtual cable was chosen for a call.
+    app_->tts()->setOutputDevice(-1);
+    // Each preview replaces the last one: on CPU a sentence can take tens of
+    // seconds, and queued previews made the app look broken.
+    app_->tts()->stop();
+    voiceStatus_->setText(tr("Playing preview…"));
+    app_->tts()->speak(russian ? tr("Это проверка моего голоса.")
+                               : tr("This is a test of my selected voice."));
 }
 
 void SettingsDialog::deleteVoice() {
@@ -777,7 +820,8 @@ void SettingsDialog::accept() {
     s->language = "auto";
     s->serviceUrl = serviceUrl_->text().trimmed();
     app_->service()->setBaseUrl(s->serviceUrl);
-    s->asrModel = asrModel_->currentData().toString();
+    const QString chosenAsr = asrModel_->currentData().toString();
+    if (!chosenAsr.isEmpty()) s->asrModel = chosenAsr;
     s->profile = "general";
     s->autoCleanEditor = autoClean_->isChecked();
     s->inputDevice = inputDevice_->currentData().toString();

@@ -47,11 +47,15 @@ QIcon icon(const QString &name, const QColor &color) {
     QByteArray svg = file.readAll().replace("currentColor", color.name().toUtf8());
     QSvgRenderer renderer(svg);
     QIcon result;
+    // Render at 2x and tag the pixmap: icons stay crisp at 125-200 % DPI
+    // instead of being upscaled from a 1x raster.
+    const qreal dpr = qApp ? qApp->devicePixelRatio() : 1.0;
     for (int size : {16, 20, 24, 32, 48, 64}) {
-        QPixmap pixmap(size, size);
+        QPixmap pixmap(int(size * dpr), int(size * dpr));
+        pixmap.setDevicePixelRatio(dpr);
         pixmap.fill(Qt::transparent);
         QPainter painter(&pixmap);
-        renderer.render(&painter);
+        renderer.render(&painter, QRectF(0, 0, size, size));
         painter.end();
         result.addPixmap(pixmap);
     }
@@ -59,31 +63,32 @@ QIcon icon(const QString &name, const QColor &color) {
 }
 
 QIcon microphoneIcon(double level, bool recording) {
+    // The recognizable Lucide mic — the same glyph as every other mic in the
+    // app — with the level filling the capsule interior while recording.
+    // The hand-drawn capsule this replaces read as a bare vertical bar.
     QPixmap pixmap(48, 48);
+    pixmap.setDevicePixelRatio(2.0);   // 48 px raster shown at 24 px: crisp
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.scale(2, 2);
     const QColor ink("#110e16");
-    painter.setPen(QPen(ink, 1.8, Qt::SolidLine, Qt::RoundCap));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRoundedRect(QRectF(9, 2, 6, 13), 3, 3);
     if (recording) {
-        QPainterPath body;
-        body.addRoundedRect(QRectF(9, 2, 6, 13), 3, 3);
-        painter.save();
-        painter.setClipPath(body);
-        painter.fillRect(QRectF(9, 15 - 13 * level, 6, 13 * level), ink);
-        painter.restore();
+        // Capsule interior (the svg path spans x 9..15, y 2..12 with a 2px
+        // stroke), filling bottom-up with the smoothed level.
+        const double h = qBound(0.0, level, 1.0) * 8.0;
+        if (h > 0.3) painter.fillRect(QRectF(10.0, 11.0 - h, 4.0, h), ink);
     }
-    painter.drawArc(QRectF(5, 5, 14, 14), 180 * 16, 180 * 16);
-    painter.drawLine(QPointF(5, 10), QPointF(5, 12));
-    painter.drawLine(QPointF(19, 10), QPointF(19, 12));
-    painter.drawLine(QPointF(12, 19), QPointF(12, 22));
+    QFile file(":/icons/mic.svg");
+    if (file.open(QIODevice::ReadOnly)) {
+        QByteArray svg = file.readAll().replace("currentColor", ink.name().toUtf8());
+        QSvgRenderer renderer(svg);
+        renderer.render(&painter, QRectF(0, 0, 24, 24));
+    }
     if (recording) {
+        // The recording dot reads on any ground: ink core with a cream rim.
+        painter.setPen(QPen(QColor("#faf1cc"), 1.0));
         painter.setBrush(ink);
-        painter.setPen(Qt::NoPen);
-        painter.drawEllipse(QPointF(21, 3), 1.5, 1.5);
+        painter.drawEllipse(QPointF(20.5, 3.5), 2.4, 2.4);
     }
     painter.end();
     return QIcon(pixmap);
@@ -117,6 +122,9 @@ QWidget *wrapDialog(QDialog &dlg, const QString &title) {
     auto *titleLabel = new QLabel(title, header);
     titleLabel->setProperty("role", "dialogTitle");
     headLay->addWidget(titleLabel, 1);
+    // Windows that switch modes (live interpreter <-> subtitles) change their
+    // window title; the frameless header must follow, not freeze on the first.
+    QObject::connect(&dlg, &QDialog::windowTitleChanged, titleLabel, &QLabel::setText);
     auto *closeBtn = new QPushButton(header);
     closeBtn->setProperty("variant", "ghost");
     closeBtn->setProperty("size", "icon");

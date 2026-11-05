@@ -35,6 +35,7 @@ class LlamaBackend:
                 args += ["-ngl", str(cfg["gpu_layers"])]
             if cfg.get("flash_attn", True):
                 args += ["-fa", "auto"]
+            args += self.memory_args(cfg)
             args += list(cfg.get("extra_args", []))
         self.proc = ManagedProcess(
             name="llama",
@@ -48,6 +49,27 @@ class LlamaBackend:
             log_dir=log_dir,
             spawn=not self.external,
         )
+
+    @staticmethod
+    def memory_args(cfg: dict[str, Any]) -> list[str]:
+        """Host-memory controls for a llama-server the service starts itself.
+
+        * ``cache_ram_mib``: the host prompt cache (``--cache-ram``). llama.cpp
+          defaults to 8192 MiB and saves idle slot states into it, so a long
+          session can grow the process by gigabytes. One dictation slot needs a
+          few cached prompts at most. ``None`` keeps llama.cpp's default.
+        * ``cache_type_k`` / ``cache_type_v``: KV cache storage (``f16`` is the
+          llama.cpp default; ``q8_0`` halves KV memory, V needs flash attention).
+        """
+        args: list[str] = []
+        cache_ram = cfg.get("cache_ram_mib")
+        if cache_ram is not None:
+            args += ["--cache-ram", str(int(cache_ram))]
+        for key, flag in (("cache_type_k", "-ctk"), ("cache_type_v", "-ctv")):
+            value = cfg.get(key)
+            if value:
+                args += [flag, str(value)]
+        return args
 
     @staticmethod
     def _resolve_binary(cfg: dict[str, Any]) -> str:
@@ -69,22 +91,33 @@ class LlamaBackend:
     async def request(self, payload: dict[str, Any], *, timeout: float = 300.0) -> AsyncIterator[httpx.Response]:
         """Yield an httpx response (streamed or not) while holding a process lease."""
         async with self.proc.lease():
-            client = httpx.AsyncClient(timeout=timeout, trust_env=False)
+            client = self.proc.http()
+            url = f"{self.proc.base_url}/v1/chat/completions"
+            stream = bool(payload.get("stream"))
             try:
-                req = client.build_request(
-                    "POST", f"{self.proc.base_url}/v1/chat/completions", json=payload
+                resp = await client.send(
+                    client.build_request("POST", url, json=payload, timeout=timeout), stream=stream
                 )
-                resp = await client.send(req, stream=bool(payload.get("stream")))
-                try:
-                    yield resp
-                finally:
-                    await resp.aclose()
+            except httpx.RemoteProtocolError:
+                # stale pooled keep-alive connection; the server never saw it
+                resp = await client.send(
+                    client.build_request("POST", url, json=payload, timeout=timeout), stream=stream
+                )
+            try:
+                yield resp
             finally:
-                await client.aclose()
+                await resp.aclose()
 
     async def complete(self, messages: list[dict[str, Any]], **kw: Any) -> dict[str, Any]:
         """Non-streaming completion returning the response JSON."""
+        # Backend-level template kwargs (config `chat_template_kwargs`) merge under
+        # per-request ones, so a model-specific template (e.g. PLaMo's target_lang)
+        # can be steered per request without touching its config.
+        ctk = dict(self.cfg.get("chat_template_kwargs") or {})
+        ctk.update(kw.pop("chat_template_kwargs", {}) or {})
         payload = {"messages": messages, "stream": False, **kw}
+        if ctk:
+            payload["chat_template_kwargs"] = ctk
         async with self.request(payload) as resp:
             resp.raise_for_status()
             return resp.json()

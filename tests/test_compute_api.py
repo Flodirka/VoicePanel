@@ -19,6 +19,7 @@ def _builds(root: Path, variants: list[tuple[str, str]]) -> None:
 
 
 AUDIOCPP = [("audiocpp-cpu", "audiocpp_server.exe"), ("audiocpp-cuda", "audiocpp_server.exe")]
+OMNIVOICE = [("omnivoice-cpu", "omnivoice-tts.exe"), ("omnivoice-cuda", "omnivoice-tts.exe")]
 LLAMA = [("llama-vulkan", "llama-server.exe"), ("llama-cuda", "llama-server.exe")]
 
 
@@ -32,18 +33,38 @@ def service(tmp_path: Path, monkeypatch):
         yield client, tmp_path
 
 
-def test_snapshot_lists_three_processes(service) -> None:
+def test_snapshot_lists_every_process(service) -> None:
     client, _ = service
     groups = {g["id"]: g for g in client.get("/admin/compute").json()["groups"]}
-    assert set(groups) == {"llm", "clone", "main"}
+    # Speaker separation is its own process: it can be placed independently of
+    # recognition, which is the point of listing it here.
+    assert set(groups) == {"llm", "clone", "main", "diar"}
     assert groups["llm"]["device"] == "cpu"          # gpu_layers 0 by default
-    assert groups["clone"]["device"] == "gpu"        # clone helper is CUDA by default
+    assert groups["clone"]["device"] == "cpu"        # omnivoice.cpp CPU build by default
     assert groups["main"]["device"] == "cpu"
+    assert groups["diar"]["device"] == "cpu"
     assert groups["main"]["available"] == ["cpu", "gpu"]
+    assert groups["diar"]["available"] == ["cpu", "gpu"]
     assert groups["main"]["process"] == "audiocpp"
-    assert groups["clone"]["process"] == "audiocpp_clone"
+    assert groups["clone"]["process"] == "omnivoice"
+    assert groups["diar"]["process"] == "audiocpp_diar"
     # Recognition and built-in voices are one process, so one choice covers both.
     assert "one process" in groups["main"]["label"]
+
+
+def test_diar_process_is_reported_and_switchable(service) -> None:
+    client, root = service
+    registry = client.app.state.registry
+    assert registry.backend_process("diar") is registry.audiocpp_diar.proc
+    assert client.get("/admin/status").json()["backends"]["audiocpp_diar"] is not None
+    registry.audiocpp_diar.proc._leases = 1
+    busy = client.post("/admin/compute", json={"devices": {"diar": "gpu"}})
+    assert busy.status_code == 409
+    registry.audiocpp_diar.proc._leases = 0
+    changed = client.post("/admin/compute", json={"devices": {"diar": "gpu"}})
+    assert changed.status_code == 200, changed.text
+    assert registry.audiocpp_diar.cfg["backend"] == "cuda"
+    assert json.loads(compute.state_path(root).read_text(encoding="utf-8"))["diar"] == "gpu"
 
 
 def test_saving_the_current_choices_writes_nothing(service) -> None:
@@ -94,7 +115,7 @@ def test_saved_choices_are_applied_at_startup(tmp_path: Path, monkeypatch) -> No
     with TestClient(app, base_url="http://127.0.0.1"):
         backends = app.state.cfg["backends"]
         assert backends["audiocpp"]["backend"] == "cuda"
-        assert backends["audiocpp_clone"]["backend"] == "cpu"
+        assert backends["omnivoice"]["backend"] == "cpu"
         assert backends["llama"]["gpu_layers"] == 0
     # config.yaml itself stays untouched: choices live in the state file.
     assert "backend" not in (tmp_path / "config.yaml").read_text(encoding="utf-8")

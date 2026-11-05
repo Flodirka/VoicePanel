@@ -126,6 +126,55 @@ async def transcriptions(
     return JSONResponse(payload)
 
 
+@router.post("/v1/audio/diarize")
+async def diarize(
+    file: UploadFile = File(...),
+    model: str | None = Form(None),
+    registry: Registry = Depends(get_registry),
+) -> JSONResponse:
+    """Who spoke when, for one utterance or one whole recording.
+
+    Returns the engine's speaker turns unchanged: ``start_sample``,
+    ``end_sample``, ``speaker_id`` and ``confidence`` from a task-``diar`` model.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty audio upload")
+    try:
+        if raw[:4] == b"RIFF":
+            wav = to_standard_wav(raw)
+        else:
+            wav = decode_any_audio(raw, file.filename or "audio")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    try:
+        model_id = registry.resolve_diar(model)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    try:
+        turns = await registry.diar_backend(model_id).diarize(wav, model=model_id)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(502, f"diarisation backend error: {exc.response.text[:300]}")
+    except httpx.HTTPError as exc:
+        raise HTTPException(504, f"diarisation backend unreachable: {exc}")
+    return JSONResponse({"model": model_id, "speaker_turns": turns})
+
+
+def tts_max_tokens(text: str, requested: int | None = None) -> int:
+    """Bound one synthesis request.
+
+    Without a cap the models do not stop themselves: measured on this machine,
+    Qwen3-TTS produced 131 s of audio for a ten-word sentence and held the
+    request for 415 s, and MOSS-TTS-Nano ran to a 48 s ceiling. Frame rates
+    differ per model (12.5 Hz for Qwen3-TTS, ~20 Hz for MOSS-TTS-Nano), so the
+    bound stays generous: 60 frames plus about 1.2 per UTF-8 byte, clamped to
+    [64, 1024]. A caller that knows better can pass its own value.
+    """
+    if requested and requested > 0:
+        return min(int(requested), 4096)
+    return max(64, min(1024, 60 + int(len(text.encode("utf-8")) * 1.2)))
+
+
 def _ts_to_s(ts_ms: Any) -> float:
     return round(int(ts_ms or 0) / 1000.0, 3)
 
@@ -140,42 +189,68 @@ async def speech(
     if not text:
         raise HTTPException(400, "input text is empty")
     voice = body.get("voice")
+    requested_model = body.get("model")
+    # Server defaults apply only to automatic routing. Explicit models and
+    # voices stay under the caller's control. The per-language default may be
+    # a voice profile id or a built-in model id (e.g. piper-ru-female to pick
+    # the female Russian voice over the male one).
+    if not voice and requested_model in (None, "", "default", "tts", "auto"):
+        lang = "ru" if has_cyrillic(text) else "en"
+        default_voice = registry.cfg.get("tts", {}).get("default_voices", {}).get(lang) or None
+        if default_voice:
+            if default_voice in registry.tts_model_ids():
+                requested_model = default_voice
+            elif request.app.state.voices.get(str(default_voice)) is None:
+                raise HTTPException(503, f"configured {lang} voice profile '{default_voice}' is unavailable")
+            else:
+                voice = default_voice
     language = body.get("language")
     speed = body.get("speed")
     response_format = body.get("response_format", "wav")
+    options = dict(body.get("options") or {})
 
     # A named voice profile selects the cloning model and its reference.
     profile = None
     if voice and getattr(request.app.state, "voices", None) is not None:
         profile = request.app.state.voices.get(str(voice))
     if profile is not None:
-        model_id = profile.get("model") or "qwen3-tts-clone"
+        model_id = profile.get("model") or registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8")
         voice = profile["id"]
         language = language or ("ru" if has_cyrillic(text) else "en")
     else:
         try:
-            model_id = registry.resolve_tts(body.get("model"), text)
+            model_id = registry.resolve_tts(requested_model, text)
         except KeyError as exc:
             raise HTTPException(404, str(exc))
-        # The only local Russian voice is the cloning model, which needs a
-        # reference profile. Built-in Piper builds reject non-English input.
-        if model_id == "qwen3-tts-clone" and not voice:
+        # A clone model without a per-language built-in needs a reference
+        # profile. piper-ru handles everyday Russian; a cloned profile is
+        # selected explicitly (voice=<profile-id>).
+        clone_id = registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8")
+        if model_id == clone_id and not voice:
             raise HTTPException(
                 400,
-                "Russian speech needs a voice profile: create one in the panel "
-                "(Settings -> Voice profiles) and select it, or send voice=<profile-id>.",
+                f"{clone_id} is a cloning model and needs a voice profile: "
+                "create one in the panel (Settings -> Voice profiles) and "
+                "select it, or send voice=<profile-id>.",
             )
+
+    # The generation cap applies to the audio-token clone engines only: the
+    # VITS built-ins (Kokoro, Piper) reject unknown request options outright.
+    if profile is not None or model_id == registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8"):
+        options.setdefault("max_tokens", tts_max_tokens(text, body.get("max_tokens")))
 
     async with registry._tts_lock:
         backend = registry.tts_backend(model_id)
         try:
             audio = await backend.speech(
-                text, model=model_id, voice=voice, speed=speed, language=language
+                text, model=model_id, voice=voice, speed=speed, language=language, options=options
             )
         except httpx.HTTPStatusError as exc:
             raise HTTPException(502, f"TTS backend error: {exc.response.text[:300]}")
         except httpx.HTTPError as exc:
             raise HTTPException(504, f"TTS backend unreachable: {exc}")
+        except RuntimeError as exc:      # the omnivoice engine reports via RuntimeError
+            raise HTTPException(502, f"TTS backend error: {exc}")
     if response_format == "pcm":
         # strip WAV header for clients that want raw PCM
         samples, sr = read_wav_bytes(audio)

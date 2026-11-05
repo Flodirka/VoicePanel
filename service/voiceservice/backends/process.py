@@ -72,6 +72,13 @@ class ManagedProcess:
         self._stop_requested = False
         self._restarts = 0
         self._idle_task: asyncio.Task | None = None
+        # True after our own child answered its health check; cleared on stop.
+        # While it holds and the child is alive, start() skips the HTTP probe.
+        self._healthy = False
+        # One pooled client per backend: keeps loopback connections alive
+        # between requests instead of building a client per call.
+        self._http: httpx.AsyncClient | None = None
+        self._http_loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------ state
     @property
@@ -104,9 +111,52 @@ class ManagedProcess:
         }
 
     # ------------------------------------------------------------- lifecycle
+    def http(self) -> httpx.AsyncClient:
+        """The pooled HTTP client for this backend (created per event loop).
+
+        Per-request timeouts are passed by the caller. Keep-alive expiry stays
+        below the 5 s idle timeout of the cpp-httplib servers so a pooled
+        connection is not reused after the server closed it.
+        """
+        loop = asyncio.get_running_loop()
+        if self._http is None or self._http.is_closed or self._http_loop is not loop:
+            self._http = httpx.AsyncClient(
+                timeout=None,
+                trust_env=False,
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4, keepalive_expiry=4.0),
+            )
+            self._http_loop = loop
+        return self._http
+
+    async def _close_http(self) -> None:
+        client, self._http = self._http, None
+        if client is not None and not client.is_closed:
+            try:
+                if self._http_loop is asyncio.get_running_loop():
+                    await client.aclose()
+            except Exception:
+                pass
+        self._http_loop = None
+
+    def _owned_and_healthy(self) -> bool:
+        return (
+            self.spawn
+            and self._healthy
+            and not self._adopted
+            and self._proc is not None
+            and self._proc.poll() is None
+        )
+
     async def start(self) -> None:
         """Ensure the backend is reachable; starts or adopts as needed."""
+        if self._owned_and_healthy():
+            # Our own child is alive and answered before: a health round trip
+            # per inference request adds latency without adding safety, since
+            # the request itself fails on a hung server.
+            return
         async with self._lock:
+            if self._owned_and_healthy():
+                return
             if not self.spawn:
                 # Someone else's server: adopt it while it answers, never replace it.
                 if await self._probe(timeout=min(self.start_timeout_s, 5.0)):
@@ -125,6 +175,8 @@ class ManagedProcess:
                         return
                     self._adopted = True   # healthy server already on the port; keep it
                     self._started_at = time.monotonic()
+                else:
+                    self._healthy = not self._adopted
                 return
             if self._adopted and not await self._probe():
                 # adopted server went away; fall through and start our own
@@ -133,6 +185,7 @@ class ManagedProcess:
                 # process alive but not answering; give it a moment then fail loudly
                 if not await self._probe(timeout=self.start_timeout_s):
                     raise ProcessError(f"{self.name}: process running but health check failed on {self.base_url}")
+                self._healthy = not self._adopted
                 return
             await self._spawn()
 
@@ -206,12 +259,16 @@ class ManagedProcess:
             if log_file:
                 log_file.close()  # the child keeps its own duplicated handle
         self._started_at = time.monotonic()
+        # A fresh process counts as used now; otherwise the idle watcher could
+        # stop a process started by /admin/.../load before anyone used it.
+        self._last_used = time.monotonic()
         self._stop_requested = False
         try:
-            await self._probe(timeout=self.start_timeout_s)
+            healthy = await self._probe(timeout=self.start_timeout_s)
         except Exception:
             await self._kill_owned()
             raise
+        self._healthy = bool(healthy)
         self._write_pid()
         self._restarts += 1
         self._ensure_idle_watcher()
@@ -237,6 +294,8 @@ class ManagedProcess:
 
     async def _kill_owned(self) -> None:
         self._adopted = False
+        self._healthy = False
+        await self._close_http()
         proc, self._proc = self._proc, None
         if proc is None:
             return
@@ -290,7 +349,11 @@ class Lease:
         self._proc._last_used = time.monotonic()
         return self
 
-    async def __aexit__(self, *exc: Any) -> None:
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if isinstance(exc, httpx.TransportError):
+            # Connection refused, reset or timed out: the next request probes
+            # the server again instead of trusting the earlier health check.
+            self._proc._healthy = False
         self._proc._release()
 
     def release(self) -> None:

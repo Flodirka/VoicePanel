@@ -44,4 +44,8 @@ The opt-in `desktopInsertionIntoFocusedTarget` test uses `VOICEPANEL_TARGET_TEST
 
 Start the configured local service and use `tools/verify_service.py` with a synthetic or explicitly approved reference recording. Its output stays under the ignored runtime directory. Do not upload generated reports or audio by default.
 
+For repeatable speed, resource and quality numbers, use `tools/bench/run_bench.py`. It measures ASR (WER, CER, latency, real-time factor, partial results), correction and translation on the synthetic suites in `tools/bench/cases/`, a request-level chain (one ASR request plus one text request, cold, with warm-up, and steady state), KV prefix reuse from llama-server's own counters, and speech synthesis, and samples memory, CPU and GPU of every engine process. Its text suites can also go straight to a llama-server to compare candidate models or the prompt order before the audit. These are request-level figures, not the latency a user sees.
+
+For user-facing latency (speech end to inserted text), start the panel with `VOICEPANEL_TIMING_LOG` set to a file path, dictate with the protocol in [Performance audit](performance-audit.md#panel-end-to-end-latency-windows), and analyze the log with `tools/bench/panel_timing.py`. Without the variable the panel writes nothing. Commands and acceptance criteria are in [Performance audit](performance-audit.md#9-local-benchmark-instructions). Results stay under `runtime/logs/bench/`.
+
 The panel's opt-in inference test needs a local `live-fixture.wav` in `panel/build`. The interactive dictation test needs a dedicated Notepad document and explicit test environment variables documented in its source. Those tests are skipped in normal model-free CI. Keep their logs and fixtures local.

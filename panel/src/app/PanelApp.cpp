@@ -1,6 +1,12 @@
 #include "app/PanelApp.h"
 
 #include "app/MainWindow.h"
+#include <QDir>
+#include <QDebug>
+
+#include "app/CaptionOverlay.h"
+#include "app/MeetingWindow.h"
+#include "app/SessionWindow.h"
 #include "app/UiKit.h"
 #include "core/DictationController.h"
 #include "core/HotkeyManager.h"
@@ -12,14 +18,25 @@
 #include "core/VoiceProfiles.h"
 #include <QFile>
 #include <QIcon>
+#include <QEventLoop>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QMenu>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
+#include <QTimer>
+#include <windows.h>
 
 using namespace VoicePanel;
+
+namespace {
+const QString kInterpreterHotkey = QStringLiteral("Ctrl+Alt+T");
+const QString kMeetingHotkey = QStringLiteral("Ctrl+Alt+M");
+}
 
 PanelApp::PanelApp(int &argc, char **argv) : QApplication(argc, argv) {
     setApplicationName("VoicePanel");
@@ -32,9 +49,11 @@ PanelApp::PanelApp(int &argc, char **argv) : QApplication(argc, argv) {
     service_ = std::make_unique<ServiceClient>();
     service_->setBaseUrl(settings_->serviceUrl);
     service_->setContext(settings_->context);
+    service_->setDictionary(Settings::termsFromContext(settings_->context));
     if (!QFile::exists(settings_->contextDocument)) settings_->saveContext();
     dictation_ = std::make_unique<DictationController>(service_.get());
     processor_ = std::make_unique<TextProcessor>(service_.get());
+    processor_->setDictionary(Settings::termsFromContext(settings_->context));
     hotkeys_ = std::make_unique<HotkeyManager>();
     tts_ = std::make_unique<TtsPlayer>(service_.get());
     store_ = std::make_unique<MarkdownStore>();
@@ -59,12 +78,18 @@ void PanelApp::loadVadModel() {
     for (const QString &c : candidates) {
         if (!c.isEmpty() && QFile::exists(c)) {
             dictation_->setVadModel(c);
+            vadPath_ = c;
             break;
         }
     }
 }
 
-PanelApp::~PanelApp() { delete window_; }
+PanelApp::~PanelApp() {
+    delete overlay_;
+    delete meetingWindow_;
+    delete sessionWindow_;
+    delete window_;
+}
 
 void PanelApp::ensureSingleInstance() {
     QLocalSocket probe;
@@ -90,6 +115,23 @@ void PanelApp::ensureSingleInstance() {
     });
 }
 
+void PanelApp::openSession(int mode) {
+    if (mode == 1) {
+        if (!meetingWindow_) meetingWindow_ = new MeetingWindow(this);
+        meetingWindow_->show();
+        meetingWindow_->raise();
+        meetingWindow_->activateWindow();
+        return;
+    }
+    if (!sessionWindow_) sessionWindow_ = new SessionWindow(this);
+    sessionWindow_->openMode(SessionWindow::Mode::Interpreter);
+}
+
+void PanelApp::openSubtitles() {
+    if (!overlay_) overlay_ = new CaptionOverlay(this);
+    overlay_->begin();
+}
+
 void PanelApp::wireHotkeys() {
     connect(hotkeys_.get(), &HotkeyManager::triggered, window_, [this](const QString &combo) {
         if (combo == settings_->insertHotkey) {
@@ -98,6 +140,10 @@ void PanelApp::wireHotkeys() {
             window_->toggleDictation(true);
         } else if (combo == settings_->saveHotkey) {
             window_->saveReviewedText();
+        } else if (combo == kInterpreterHotkey) {
+            openSession(0);
+        } else if (combo == kMeetingHotkey) {
+            openSession(1);
         }
     });
 }
@@ -108,14 +154,69 @@ QString PanelApp::applySettings() {
     processor_->setAutoTranslate(settings_->autoTranslate);
     processor_->setProfile("general");
     service_->setContext(settings_->context);
+    service_->setDictionary(Settings::termsFromContext(settings_->context));
+    processor_->setDictionary(Settings::termsFromContext(settings_->context));
     store_->setDir(settings_->transcriptDirectory());
     loadVadModel();
     hotkeys_->unregisterAll();
     QStringList failed;
-    for (const QString &combo : {settings_->insertHotkey, settings_->insertHotkey2, settings_->saveHotkey}) {
+    for (const QString &combo : {settings_->insertHotkey, settings_->insertHotkey2,
+                                 settings_->saveHotkey}) {
         if (!hotkeys_->registerHotkey(combo)) failed << combo;
     }
+    // The live modes are also in the tray menu, so a hotkey that another
+    // application already owns must not produce a warning on every start.
+    for (const QString &combo : {kInterpreterHotkey, kMeetingHotkey}) {
+        hotkeys_->registerHotkey(combo);
+    }
     return failed.isEmpty() ? QString() : tr("Hotkey unavailable: %1").arg(failed.join(", "));
+}
+
+int PanelApp::runCheckBundle() {
+    // No window, tray, single-instance lock or message loop, and the
+    // microphone is never opened: a packaged build must prove its parts
+    // resolve before the user starts it. Prints one PASS/FAIL line per check.
+    // The report lands in check-bundle.txt next to the exe: the exe is a
+    // WIN32 app, so console output is unreliable when launched redirected,
+    // and AttachConsole/freopen on CONOUT$ can crash in that case.
+    QFile report(QCoreApplication::applicationDirPath() + "/check-bundle.txt");
+    const bool reportOpen = report.open(QIODevice::WriteOnly | QIODevice::Text);
+    int failures = 0;
+    const auto check = [&failures, &report, reportOpen](const QString &name, bool ok, const QString &detail = {}) {
+        const QString line = QStringLiteral("%1 %2 %3\n").arg(ok ? "PASS" : "FAIL", name.leftJustified(28), detail);
+        if (reportOpen) report.write(line.toUtf8());
+        qDebug().noquote() << line.trimmed();
+        if (!ok) ++failures;
+    };
+    check("settings", true, settings_->contextDocument);
+    check("context document", QFile::exists(settings_->contextDocument), settings_->contextDocument);
+    const QStringList terms = Settings::termsFromContext(settings_->context);
+    check("terminology dictionary", true, QStringLiteral("%1 term(s)").arg(terms.size()));
+    check("VAD model", !vadPath_.isEmpty() && QFile::exists(vadPath_), vadPath_);
+    const QString hotkeyError = applySettings();   // registers the real hotkeys
+    check("hotkeys", hotkeyError.isEmpty(), hotkeyError);
+    hotkeys_->unregisterAll();
+    // Service reachability: one synchronous /health probe with a short timeout.
+    QNetworkAccessManager nam;
+    QNetworkReply *reply = nam.get(QNetworkRequest(QUrl(settings_->serviceUrl + "/health")));
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    bool timedOut = false;
+    QObject::connect(&timer, &QTimer::timeout, &loop, [&]() { timedOut = true; loop.quit(); });
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    timer.start(3000);
+    loop.exec();
+    bool serviceOk = !timedOut && reply->error() == QNetworkReply::NoError;
+    QString detail = timedOut ? QStringLiteral("no answer within 3 s") : reply->errorString();
+    if (serviceOk) detail = QString::fromUtf8(reply->readAll()).left(120);
+    reply->deleteLater();
+    check("service /health", serviceOk, detail);
+    const QString summary = QStringLiteral("bundle check: %1 (%2 failure(s))\n")
+        .arg(failures ? "FAILED" : "OK").arg(failures);
+    if (reportOpen) { report.write(summary.toUtf8()); report.close(); }
+    qDebug().noquote() << summary.trimmed();
+    return failures ? 1 : 0;
 }
 
 int PanelApp::run() {
@@ -130,11 +231,25 @@ int PanelApp::run() {
     tray_->setIcon(window_->windowIcon());
     tray_->setToolTip(tr("Voice panel"));
     auto *menu = new QMenu(window_);
-    menu->addAction(tr("Show panel"), window_, &MainWindow::showExpanded);
-    menu->addAction(tr("Start dictation"), window_, [this]() { window_->startDictation(false); });
-    menu->addAction(tr("Voice playback…"), window_, &MainWindow::openVoicePlayback);
-    menu->addAction(tr("Settings..."), window_, &MainWindow::openSettings);
-    menu->addAction(tr("Quit"), qApp, &QApplication::quit);
+    // Same Lucide glyphs as their in-app counterparts, so tray entries and
+    // window controls never suggest different features by accident.
+    auto *showPanel = menu->addAction(tr("Show panel"), window_, &MainWindow::showExpanded);
+    showPanel->setIcon(UiKit::icon("text-box"));
+    auto *dictate = menu->addAction(tr("Start dictation"), window_,
+                                    [this]() { window_->startDictation(false); });
+    dictate->setIcon(UiKit::icon("mic"));
+    auto *playback = menu->addAction(tr("Voice playback…"), window_, &MainWindow::openVoicePlayback);
+    playback->setIcon(UiKit::icon("volume"));
+    auto *interpreter = menu->addAction(tr("Live interpreter…"), window_, [this]() { openSession(0); });
+    interpreter->setIcon(UiKit::icon("languages"));
+    auto *meeting = menu->addAction(tr("Meeting transcript…"), window_, [this]() { openSession(1); });
+    meeting->setIcon(UiKit::icon("users"));
+    auto *subtitles = menu->addAction(tr("Subtitles overlay…"), window_, [this]() { openSubtitles(); });
+    subtitles->setIcon(UiKit::icon("captions"));
+    auto *settings = menu->addAction(tr("Settings..."), window_, &MainWindow::openSettings);
+    settings->setIcon(UiKit::icon("cog"));
+    auto *quit = menu->addAction(tr("Quit"), qApp, &QApplication::quit);
+    quit->setIcon(UiKit::icon("close"));
     tray_->setContextMenu(menu);
     connect(tray_, &QSystemTrayIcon::activated, window_, [this](QSystemTrayIcon::ActivationReason r) {
         if (r == QSystemTrayIcon::DoubleClick) window_->showExpanded();
@@ -142,4 +257,43 @@ int PanelApp::run() {
     tray_->show();
     voices_->refresh();
     return exec();
+}
+
+int PanelApp::runCaptureUi(const QString &outDir) {
+    // Offscreen rendering of every surface for visual QA: grab() paints the
+    // widget with its real style and fonts without showing or focusing
+    // anything, so a design check never fights the user for the desktop.
+    QDir().mkpath(outDir);
+    int saved = 0;
+    const auto snap = [&outDir, &saved](QWidget &widget, const QString &name) {
+        widget.adjustSize();
+        const QPixmap shot = widget.grab();
+        const QString path = outDir + "/" + name + ".png";
+        if (shot.save(path)) ++saved;
+    };
+
+    MainWindow window(this);
+    snap(window, "panel-bar");
+    window.showExpanded();
+    snap(window, "panel-expanded");
+    window.setLiveRecording(true);
+    snap(window, "panel-recording");
+    window.setLiveRecording(false);
+
+    SessionWindow live(this);
+    live.openMode(SessionWindow::Mode::Interpreter);
+    snap(live, "session-interpreter");
+    live.openMode(SessionWindow::Mode::Subtitles);
+    snap(live, "session-subtitles");
+
+    MeetingWindow meeting(this);
+    snap(meeting, "meeting");
+
+    CaptionOverlay overlay(this);
+    snap(overlay, "caption-overlay");
+
+    window.hide();
+    live.hide();
+    qDebug().noquote() << QStringLiteral("capture-ui: %1 frame(s) in %2").arg(saved).arg(outDir);
+    return saved >= 6 ? 0 : 1;
 }

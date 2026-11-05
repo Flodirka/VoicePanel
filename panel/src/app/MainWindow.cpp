@@ -3,11 +3,13 @@
 #include "app/SettingsDialog.h"
 #include "app/UiKit.h"
 #include "app/VoicePlaybackDialog.h"
+#include "core/AudioMeter.h"
 #include "core/DictationController.h"
 #include "core/MarkdownStore.h"
 #include "core/ServiceClient.h"
 #include "core/Settings.h"
 #include "core/TextInserter.h"
+#include "core/TimingLog.h"
 #include "core/TextProcessor.h"
 #include <QActionGroup>
 #include <QApplication>
@@ -82,6 +84,16 @@ MainWindow::MainWindow(PanelApp *app, QWidget *parent) : QMainWindow(parent), ap
     connect(app_->processor(), &TextProcessor::failed, this, [this](const QString &error) {
         processingLabel_->setText(error);
     });
+    connect(app_->processor(), &TextProcessor::processingFailed, this, [this](const QString &, const QString &error) {
+        // The unprocessed text stays in the original pane and at the end of the
+        // result pane. Automatic insertion only sends processed batches, so it
+        // never reaches the target as if it were corrected or translated.
+        processingLabel_->setText(
+            (app_->settings()->autoTranslate ? tr("Translation stopped: %1") : tr("Correction stopped: %1")).arg(error)
+            + "\n" + tr("The unprocessed text is kept at the end of the result and is not inserted automatically. "
+                        "After recording, right-click and choose Retry correction, or review and copy it."));
+        showExpanded();
+    });
     connect(&statusTimer_, &QTimer::timeout, this, &MainWindow::updateServiceStatus);
     statusTimer_.start(15000);
     // Rollover waits for recognition, processing and insertion, then saves the
@@ -123,6 +135,8 @@ void MainWindow::buildUi() {
     auto *root = new QWidget;
     root->setObjectName("panelRoot");
     rootLayout_ = new QVBoxLayout(root);
+    // Two pixels outside the rounded shell keep the border and its shadow
+    // inside the window; the design-system insets live inside the bar.
     rootLayout_->setContentsMargins(2, 2, 2, 2);
     rootLayout_->setSpacing(0);
     compactBar_ = new QWidget;
@@ -130,7 +144,7 @@ void MainWindow::buildUi() {
     compactBar_->installEventFilter(this);
     compactBar_->setCursor(Qt::SizeAllCursor);
     barLayout_ = new QHBoxLayout(compactBar_);
-    barLayout_->setContentsMargins(10, 8, 10, 8);
+    barLayout_->setContentsMargins(16, 10, 16, 10);
     barLayout_->setSpacing(8);
     placementButton_ = new QPushButton;
     placementButton_->setObjectName("placementButton");
@@ -166,12 +180,68 @@ void MainWindow::buildUi() {
     expandButton_ = new QPushButton(tr("Preview"));
     expandButton_->setObjectName("previewButton");
     expandButton_->setProperty("variant", "ghost");
-    expandButton_->setIcon(UiKit::icon("text-box"));
+    expandButton_->setIcon(UiKit::icon("eye"));
     expandButton_->setToolTip(tr("Open or collapse transcript preview"));
     connect(expandButton_, &QPushButton::clicked, this, [this]() {
         expanded_ ? showCompact() : showExpanded();
     });
     barLayout_->addWidget(expandButton_);
+
+    // The two live modes live in their own window, but they must be findable
+    // from the panel itself, not only from the tray menu.
+    // Two verbs, two buttons: the interpreter speaks, the meeting window
+    // records a transcript. A drop-down hid both behind one icon.
+    liveButton_ = new QPushButton;
+    liveButton_->setObjectName(QStringLiteral("liveButton"));
+    liveButton_->setProperty("variant", "ghost");
+    liveButton_->setProperty("size", "icon");
+    liveButton_->setIcon(UiKit::icon("languages"));
+    liveButton_->setToolTip(tr("Live interpreter: your voice into a call"));
+    liveButton_->setFixedSize(36, 36);
+    liveButton_->setIconSize(QSize(20, 20));
+    liveButton_->setFocusPolicy(Qt::NoFocus);
+    liveButton_->setAccessibleName(tr("Live interpreter"));
+    connect(liveButton_, &QPushButton::clicked, this, [this]() { app_->openSession(0); });
+    barLayout_->addWidget(liveButton_);
+
+    meetingButton_ = new QPushButton;
+    meetingButton_->setObjectName(QStringLiteral("meetingButton"));
+    meetingButton_->setProperty("variant", "ghost");
+    meetingButton_->setProperty("size", "icon");
+    meetingButton_->setIcon(UiKit::icon("users"));
+    meetingButton_->setToolTip(tr("Meeting transcript: speakers, timestamps, saved text"));
+    meetingButton_->setFixedSize(36, 36);
+    meetingButton_->setIconSize(QSize(20, 20));
+    meetingButton_->setFocusPolicy(Qt::NoFocus);
+    meetingButton_->setAccessibleName(tr("Meeting transcript"));
+    connect(meetingButton_, &QPushButton::clicked, this, [this]() { app_->openSession(1); });
+    barLayout_->addWidget(meetingButton_);
+
+    voiceButton_ = new QPushButton;
+    voiceButton_->setObjectName(QStringLiteral("voiceButton"));
+    voiceButton_->setProperty("variant", "ghost");
+    voiceButton_->setProperty("size", "icon");
+    voiceButton_->setIcon(UiKit::icon("volume"));
+    voiceButton_->setToolTip(tr("Voice: type or dictate text, speak it, save it, or send it to a cable"));
+    voiceButton_->setFixedSize(36, 36);
+    voiceButton_->setIconSize(QSize(20, 20));
+    voiceButton_->setFocusPolicy(Qt::NoFocus);
+    voiceButton_->setAccessibleName(tr("Voice"));
+    connect(voiceButton_, &QPushButton::clicked, this, &MainWindow::openVoicePlayback);
+    barLayout_->addWidget(voiceButton_);
+
+    subtitlesButton_ = new QPushButton;
+    subtitlesButton_->setObjectName(QStringLiteral("subtitlesButton"));
+    subtitlesButton_->setProperty("variant", "ghost");
+    subtitlesButton_->setProperty("size", "icon");
+    subtitlesButton_->setIcon(UiKit::icon("captions"));
+    subtitlesButton_->setToolTip(tr("Subtitles for one application, with optional voice-over"));
+    subtitlesButton_->setFixedSize(36, 36);
+    subtitlesButton_->setIconSize(QSize(20, 20));
+    subtitlesButton_->setFocusPolicy(Qt::NoFocus);
+    subtitlesButton_->setAccessibleName(tr("Subtitles"));
+    connect(subtitlesButton_, &QPushButton::clicked, this, [this]() { app_->openSubtitles(); });
+    barLayout_->addWidget(subtitlesButton_);
 
     auto *placement = new QMenu(placementButton_);
     placement->setObjectName("placementMenu");
@@ -228,7 +298,7 @@ void MainWindow::buildUi() {
     editorShell->setObjectName("editorPage");
     previewLayout->addWidget(editorShell);
     auto *editor = new QVBoxLayout(editorShell);
-    editor->setContentsMargins(16, 16, 16, 10);
+    editor->setContentsMargins(24, 20, 24, 16);
     editor->setSpacing(12);
     auto *title = new QLabel(tr("Transcript preview"));
     title->setProperty("role", "dialogTitle");
@@ -237,6 +307,7 @@ void MainWindow::buildUi() {
     translateButton_ = new QPushButton(tr("Translate"));
     translateButton_->setObjectName("translateText");
     translateButton_->setProperty("variant", "ghost");
+    translateButton_->setIcon(UiKit::icon("arrow-right-left"));
     translateButton_->setToolTip(tr("Translate reviewed text: Russian to English or English to Russian"));
     connect(translateButton_, &QPushButton::clicked, this, &MainWindow::translateResult);
     previewHeader->addWidget(translateButton_);
@@ -329,8 +400,10 @@ void MainWindow::buildUi() {
     review->addWidget(changeLabel_, 1);
     acceptButton_ = new QPushButton(tr("Accept"));
     acceptButton_->setObjectName("acceptCorrection");
+    acceptButton_->setIcon(UiKit::icon("check"));
     rejectButton_ = new QPushButton(tr("Reject"));
     rejectButton_->setObjectName("rejectCorrection");
+    rejectButton_->setIcon(UiKit::icon("undo-2"));
     acceptButton_->setProperty("variant", "outline");
     rejectButton_->setProperty("variant", "ghost");
     acceptButton_->setToolTip(tr("Accept all current corrections"));
@@ -355,6 +428,7 @@ void MainWindow::buildUi() {
     historyButton_ = new QPushButton(tr("History"));
     historyButton_->setObjectName("transcriptHistory");
     historyButton_->setProperty("variant", "ghost");
+    historyButton_->setIcon(UiKit::icon("history"));
     historyButton_->setToolTip(tr("Restore a previous transcript, including text that could not be inserted or saved"));
     connect(historyButton_, &QPushButton::clicked, this, [this]() {
         QMenu menu(historyButton_);
@@ -369,10 +443,12 @@ void MainWindow::buildUi() {
     actions->addStretch();
     copyButton_ = new QPushButton(tr("Copy"));
     copyButton_->setProperty("variant", "outline");
+    copyButton_->setIcon(UiKit::icon("clipboard"));
     connect(copyButton_, &QPushButton::clicked, this, &MainWindow::copyResult);
     actions->addWidget(copyButton_);
     insertButton_ = new QPushButton(tr("Insert"));
     insertButton_->setProperty("variant", "primary");
+    insertButton_->setIcon(UiKit::icon("corner-down-left"));
     insertButton_->setToolTip(tr("Insert into the remembered field without submitting."));
     connect(insertButton_, &QPushButton::clicked, this, [this]() { insertResult(); });
     actions->addWidget(insertButton_);
@@ -504,6 +580,11 @@ void MainWindow::startDictation(bool reviewMode) {
     app_->dictation()->setParams(params);
     app_->dictation()->setInputDevice(settings->inputDevice);
     if (!app_->dictation()->start()) { updateActions(); return; }
+    // The first utterance ends a second or more from now: load the models it
+    // needs in that window instead of after it.
+    app_->service()->warmup(settings->autoTranslate ? "auto_translate"
+                            : settings->autoCleanEditor ? "auto_correct" : "dictation",
+                            "general");
     recording_ = sessionActive_ = true;
     statusLabel_->setText(tr("Listening…"));
     processingLabel_->setText(target_.isValid() ? tr("Target: %1").arg(target_.windowTitle)
@@ -736,10 +817,22 @@ void MainWindow::updateActions() {
     rejectButton_->setEnabled(!finishing_ && !corrections_.isEmpty());
 }
 
+void MainWindow::setLiveRecording(bool recording) {
+    if (liveRecording_ == recording) return;
+    liveRecording_ = recording;
+    updateMicrophone();
+    updateActions();
+}
+
 void MainWindow::updateMicrophone(double rms) {
-    const double level = recording_ ? qBound(0.0, (20.0 * std::log10(qMax(rms, 1e-6)) + 60) / 60, 1.0) : 0;
-    microphoneLevel_ = recording_ ? microphoneLevel_ * 0.5 + level * 0.5 : 0;
-    micButton_->setIcon(UiKit::microphoneIcon(microphoneLevel_, recording_));
+    // A live session records the microphone too, so the badge shows capture
+    // truth even when dictation itself is idle.
+    const bool capturing = recording_ || liveRecording_;
+    const double level = recording_ ? AudioMeter::normalized(rms) : 0;
+    microphoneLevel_ = capturing ? microphoneLevel_ * 0.5 + level * 0.5 : 0;
+    micButton_->setIcon(UiKit::microphoneIcon(microphoneLevel_, capturing));
+    micButton_->setToolTip(capturing && !recording_
+        ? tr("Recording a live session") : micButton_->toolTip());
 }
 
 void MainWindow::finishSession() {
@@ -777,6 +870,8 @@ void MainWindow::insertResult(bool automatic) {
     if (insertedText_.isEmpty() && insertedEarlierDocument_) remaining.prepend(' ');
     const auto report = insertIntoTarget(target_, remaining);
     if (report.result == InsertResult::Ok || report.result == InsertResult::ClipboardFallback) {
+        TimingLog::event("inserted", {{"chars", int(remaining.size())}, {"automatic", automatic},
+                                      {"clipboard", report.result == InsertResult::ClipboardFallback}});
         insertedText_ = text;
         insertionFailed_ = false;
         processingLabel_->setText(tr("Inserted without submitting."));
@@ -891,7 +986,10 @@ void MainWindow::updateDockLayout() {
     compactBar_->setMinimumSize(0, 0);
     compactBar_->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
     barLayout_->setDirection(vertical ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
-    barLayout_->setContentsMargins(vertical ? 8 : 10, 8, vertical ? 8 : 10, 8);
+    // Vertical rail: the buttons must stay centred in 52 px, so 8 px each side.
+    // Horizontal bar: space-4 (16 px) per the design tokens.
+    barLayout_->setContentsMargins(vertical ? 8 : 16, vertical ? 8 : 10,
+                                   vertical ? 8 : 16, vertical ? 8 : 10);
     langLabel_->setVisible(!vertical);
     statusLabel_->setVisible(!vertical);
     expandButton_->setText(vertical ? QString() : tr("Preview"));
@@ -901,12 +999,18 @@ void MainWindow::updateDockLayout() {
     expandButton_->style()->unpolish(expandButton_);
     expandButton_->style()->polish(expandButton_);
     if (vertical) {
-        compactBar_->setFixedSize(52, 228);
-        expandButton_->setFixedSize(36, 36);
-        setFixedSize(56, 232);
+        // The rail must size to its buttons: seven controls, one per row, plus
+        // the spacing and insets, or they are packed unevenly.
+        const int rows = 9;
+        const int spacing = 8;
+        const int barHeight = 2 * 8 + rows * 36 + (rows - 1) * spacing;
+        compactBar_->setFixedSize(52, barHeight);
+        setFixedSize(56, barHeight + 4);
     } else {
         compactBar_->setFixedHeight(52);
-        setFixedSize(640, 56);
+        // Nine controls plus the status text need a little more room than the
+        // original six.
+        setFixedSize(720, 56);
     }
 }
 

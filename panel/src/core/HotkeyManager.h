@@ -16,6 +16,7 @@ public:
     bool registerHotkey(const QString &combo);      // emits triggered(combo)
     void unregisterAll();
     int count() const { return active_.size(); }
+    bool contains(const QString &combo) const;
 
 signals:
     void triggered(const QString &combo);

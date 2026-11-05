@@ -5,14 +5,18 @@
 
 using namespace VoicePanel;
 
+double AudioMeter::normalized(double rms) {
+    // speech RMS hovers around 0.02-0.3; map logarithmically to 0..1
+    const double db = 20.0 * std::log10(std::max(rms, 1e-6));
+    return qBound(0.0, (db + 60.0) / 60.0, 1.0);
+}
+
 AudioMeter::AudioMeter(QWidget *parent) : QWidget(parent) {
     setAttribute(Qt::WA_OpaquePaintEvent, false);
 }
 
 void AudioMeter::setLevel(double rms) {
-    // speech RMS hovers around 0.02-0.3; map logarithmically to 0..1
-    const double db = 20.0 * std::log10(std::max(rms, 1e-6));
-    const double norm = qBound(0.0, (db + 60.0) / 60.0, 1.0);
+    const double norm = normalized(rms);
     smooth_ = smooth_ * 0.6 + norm * 0.4;
     level_ = norm;
     update();

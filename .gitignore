@@ -68,3 +68,6 @@ venv/
 # OS files.
 Thumbs.db
 .DS_Store
+
+# Release bundles (tools/package_release.ps1)
+/dist/

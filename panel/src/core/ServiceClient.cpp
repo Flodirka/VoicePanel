@@ -117,6 +117,25 @@ void ServiceClient::postMultipart(const QString &path,
     });
 }
 
+void ServiceClient::diarize(const QByteArray &wav,
+                            std::function<void(bool, QJsonArray, QString)> cb) {
+    postMultipart("/v1/audio/diarize", {}, "file", "utterance.wav", wav, "audio/wav",
+                  [cb](bool ok, QByteArray body, QString error) mutable {
+                      if (!ok) {
+                          QJsonParseError pe;
+                          const auto doc = QJsonDocument::fromJson(body, &pe);
+                          if (pe.error == QJsonParseError::NoError) {
+                              const QString detail = doc.object().value("detail").toString();
+                              if (!detail.isEmpty()) error = detail;
+                          }
+                          cb(false, {}, error);
+                          return;
+                      }
+                      const auto doc = QJsonDocument::fromJson(body);
+                      cb(true, doc.object().value("speaker_turns").toArray(), {});
+                  });
+}
+
 void ServiceClient::transcribe(const QByteArray &wav, const QString &model,
                                const QString &language,
                                std::function<void(bool, QString, QString)> cb) {
@@ -148,13 +167,20 @@ void ServiceClient::processText(const QString &text, const QString &mode,
                                 std::function<void(bool, QString, QString, QString)> cb) {
     QJsonObject payload{{"text", text}, {"mode", mode}, {"profile", profile}};
     if (!context_.isEmpty()) payload.insert("context", context_);
+    if (!dictionary_.isEmpty()) {
+        QJsonArray terms;
+        for (const QString &term : dictionary_) terms.append(term);
+        payload.insert("dictionary", terms);
+    }
     if (!previous.isEmpty()) payload.insert("previous", previous);
     if (!spelling.isEmpty()) {
         QJsonArray hints;
         for (const auto &hint : spelling) {
             QJsonArray suggestions;
             for (const auto &suggestion : hint.suggestions) suggestions.append(suggestion);
-            hints.append(QJsonObject{{"word", hint.word}, {"suggestions", suggestions}});
+            QJsonObject h{{"word", hint.word}, {"suggestions", suggestions}};
+            if (!hint.proposed.isEmpty()) h.insert("proposed", hint.proposed);
+            hints.append(h);
         }
         payload.insert("spelling", hints);
     }
@@ -163,7 +189,10 @@ void ServiceClient::processText(const QString &text, const QString &mode,
             QJsonParseError pe;
             auto doc = QJsonDocument::fromJson(body, &pe);
             if (pe.error == QJsonParseError::NoError) {
-                auto detail = doc.object().value("detail").toString();
+                const auto obj = doc.object();
+                auto detail = obj.value("detail").toString();
+                if (obj.value("reason").toString() == "generation_limit")
+                    detail = tr("The text model stopped at its output limit, so this text was not processed.");
                 if (!detail.isEmpty()) err = detail;
             }
             cb(false, {}, {}, err);
@@ -172,6 +201,18 @@ void ServiceClient::processText(const QString &text, const QString &mode,
         auto obj = QJsonDocument::fromJson(body).object();
         cb(true, obj.value("result").toString(), obj.value("notes").toString(), {});
     });
+}
+
+void ServiceClient::warmup(const QString &mode, const QString &profile) {
+    QJsonObject payload{{"mode", mode}, {"profile", profile}};
+    if (!context_.isEmpty()) payload.insert("context", context_);
+    if (!dictionary_.isEmpty()) {
+        QJsonArray terms;
+        for (const QString &term : dictionary_) terms.append(term);
+        payload.insert("dictionary", terms);
+    }
+    postJson("/v1/warmup", QJsonDocument(payload).toJson(QJsonDocument::Compact),
+             [](bool, QByteArray, QString) {});
 }
 
 void ServiceClient::speech(const QString &text, const QString &model, const QString &voice,

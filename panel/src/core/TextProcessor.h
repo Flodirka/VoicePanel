@@ -22,6 +22,10 @@ public:
     void setMode(const QString &mode) { mode_ = mode; }
     void setProfile(const QString &profile) { profile_ = profile; }
     void setAutoTranslate(bool enabled) { autoTranslate_ = enabled; }
+    // User terminology from the context document; spell-checker hits that are
+    // one of these words are not reported, and the service fixes near-misses
+    // of them deterministically before calling the model.
+    void setDictionary(const QStringList &terms) { dictionary_ = terms; }
 
     // Queue finalized transcript text for processing. Only complete sentences
     // are dispatched; incomplete tails wait for more text or stop().
@@ -40,6 +44,10 @@ signals:
     // Unprocessed tail at end of session (incomplete sentence).
     void fragmentRemaining(const QString &fragment);
     void failed(const QString &error);
+    // A batch could not be processed (backend error or generation limit). The
+    // original stays queued in pendingOriginal() and is never reported as a
+    // processed result, so automatic insertion cannot send it.
+    void processingFailed(const QString &original, const QString &error);
     void finished();
     void pendingChanged(const QString &text);
 
@@ -49,6 +57,8 @@ private:
     static QPair<QString, QString> splitCompletePrefix(const QString &text);
 
     ServiceClient *service_;
+    SpellingChecker spell_;
+    QStringList dictionary_;
     QString mode_;
     QString profile_;
     QString pendingOriginal_;      // stable text not yet dispatched

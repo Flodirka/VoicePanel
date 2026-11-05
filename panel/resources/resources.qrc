@@ -22,5 +22,16 @@
         <file>icons/folder.svg</file>
         <file>icons/play.svg</file>
         <file>icons/volume.svg</file>
+        <file>icons/languages.svg</file>
+        <file>icons/users.svg</file>
+        <file>icons/captions.svg</file>
+        <file>icons/eye.svg</file>
+        <file>icons/audio-lines.svg</file>
+        <file>icons/rotate-cw.svg</file>
+        <file>icons/arrow-right-left.svg</file>
+        <file>icons/history.svg</file>
+        <file>icons/corner-down-left.svg</file>
+        <file>icons/undo-2.svg</file>
+        <file>icons/trash.svg</file>
     </qresource>
 </RCC>

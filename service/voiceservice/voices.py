@@ -87,7 +87,7 @@ class VoiceStore:
             out.append({
                 "id": vid,
                 "name": entry.get("name", vid),
-                "model": entry.get("model", "qwen3-tts-clone"),
+                "model": entry.get("model", "omnivoice-q8"),
                 "language": entry.get("language", ""),
                 "reference_text": entry.get("reference_text", ""),
                 "reference_duration_s": entry.get("reference_duration_s"),
@@ -110,7 +110,7 @@ class VoiceStore:
         audio_bytes: bytes,
         reference_text: str = "",
         language: str = "",
-        model: str = "qwen3-tts-clone",
+        model: str = "omnivoice-q8",
     ) -> dict[str, Any]:
         voice_id = _slug(name) or f"voice-{uuid.uuid4().hex[:8]}"
         if not SAFE_ID.match(voice_id):

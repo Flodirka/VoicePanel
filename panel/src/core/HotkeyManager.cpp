@@ -91,4 +91,11 @@ void HotkeyManager::fire(int id) {
     if (active_.contains(id)) emit triggered(active_.value(id));
 }
 
+bool HotkeyManager::contains(const QString &combo) const {
+    for (const QString &registered : active_) {
+        if (registered == combo) return true;
+    }
+    return false;
+}
+
 } // namespace VoicePanel

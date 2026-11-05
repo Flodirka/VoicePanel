@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,12 @@ async def _post_with_retry(
     client: httpx.AsyncClient, url: str, **kwargs: Any
 ) -> httpx.Response:
     try:
+        resp = await client.post(url, **kwargs)
+        resp.raise_for_status()
+        return resp
+    except httpx.RemoteProtocolError:
+        # A pooled keep-alive connection that the server closed between
+        # requests: the request never reached the model, so send it again.
         resp = await client.post(url, **kwargs)
         resp.raise_for_status()
         return resp
@@ -109,6 +117,16 @@ class AudioCppBackend:
         self.config_path.write_text(json.dumps(server, indent=2), encoding="utf-8")
 
     # ------------------------------------------------------------------ ASR
+    def supports_language(self, model: str) -> bool:
+        """Whether this model declares a `language` request option.
+
+        Parakeet-TDT rejects the field outright ("unknown Parakeet TDT request
+        option: language"), which turns every request into a 500 until the
+        entry is fixed. Model entries that cannot take a language set
+        ``supports_language: false``.
+        """
+        return bool(self.models.get(model, {}).get("supports_language", True))
+
     async def transcribe(
         self,
         wav_bytes: bytes,
@@ -119,36 +137,105 @@ class AudioCppBackend:
         timeout: float = 300.0,
     ) -> dict[str, Any]:
         """Returns {"text": str, ...}; audio must be 16 kHz mono PCM WAV."""
-        async with self.proc.lease() as lease:  # noqa: F841 - lease keeps process alive
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                data = {"model": model, "response_format": "json"}
-                if language:
-                    data["language"] = language
-                if prompt:
-                    data["prompt"] = prompt
-                resp = await _post_with_retry(
-                    client,
-                    f"{self.proc.base_url}/v1/audio/transcriptions",
-                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data=data,
-                )
-                return resp.json()
+        async with self.proc.lease():  # the lease keeps the process alive
+            data = {"model": model, "response_format": "json"}
+            if language and self.supports_language(model):
+                data["language"] = language
+            if prompt:
+                data["prompt"] = prompt
+            resp = await _post_with_retry(
+                self.proc.http(),
+                f"{self.proc.base_url}/v1/audio/transcriptions",
+                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                data=data,
+                timeout=timeout,
+            )
+            return resp.json()
+
     async def transcribe_detailed(
         self, wav_bytes: bytes, *, model: str, language: str | None = None, timeout: float = 300.0
     ) -> dict[str, Any]:
         """Word-level detail variant when the model family supports it."""
         async with self.proc.lease():
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                data = {"model": model}
-                if language:
-                    data["language"] = language
+            data = {"model": model}
+            if language and self.supports_language(model):
+                data["language"] = language
+            resp = await _post_with_retry(
+                self.proc.http(),
+                f"{self.proc.base_url}/v1/audio/transcriptions/details",
+                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                data=data,
+                timeout=timeout,
+            )
+            return resp.json()
+
+    async def diarize(self, wav_bytes: bytes, *, model: str, timeout: float = 300.0) -> list[dict]:
+        """Speaker turns for one WAV.
+
+        Task-`diar` models are not served by the transcription route (it insists
+        on transcript text), so this uses the generic task route, which takes a
+        server-local path. The file is written beside the service and removed
+        immediately; nothing is kept.
+        """
+        async with self.proc.lease():
+            handle, path = tempfile.mkstemp(suffix=".wav", dir=str(self.config_path.parent))
+            try:
+                with os.fdopen(handle, "wb") as fh:
+                    fh.write(wav_bytes)
+                payload = {"model": model, "audio": path}
                 resp = await _post_with_retry(
-                    client,
-                    f"{self.proc.base_url}/v1/audio/transcriptions/details",
-                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data=data,
+                    self.proc.http(),
+                    f"{self.proc.base_url}/v1/tasks/run",
+                    json=payload,
+                    timeout=timeout,
                 )
-                return resp.json()
+                data = resp.json()
+                return data.get("speaker_turns") or []
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    async def transcribe_live(
+        self,
+        pcm_chunks,
+        *,
+        model: str,
+        language: str | None = None,
+        sample_rate: int = 16000,
+        channels: int = 1,
+        timeout: float = 900.0,
+    ):
+        """Stream raw PCM16 to the engine's live route and yield its SSE lines.
+
+        The caller owns the ASR lock for the whole stream: the engine serves one
+        model at a time, and a live request holds it until the body closes.
+        """
+        params: dict[str, Any] = {
+            "model": model,
+            "sample_rate": int(sample_rate),
+            "channels": int(channels),
+            "sample_format": "s16le",
+        }
+        if language and self.supports_language(model):
+            params["language"] = language
+        async with self.proc.lease():
+            client = self.proc.http()
+            async with client.stream(
+                "POST",
+                f"{self.proc.base_url}/v1/audio/transcriptions/live",
+                params=params,
+                content=pcm_chunks,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=timeout,
+            ) as resp:
+                if resp.status_code != 200:
+                    body = (await resp.aread())[:400].decode("utf-8", "replace")
+                    raise RuntimeError(f"live transcription failed ({resp.status_code}): {body}")
+                async for line in resp.aiter_lines():
+                    if line:
+                        yield line
 
     # ------------------------------------------------------------------ TTS
     async def speech(
@@ -159,30 +246,33 @@ class AudioCppBackend:
         voice: str | None = None,
         speed: float | None = None,
         language: str | None = None,
+        options: dict[str, Any] | None = None,
         timeout: float = 300.0,
     ) -> bytes:
         async with self.proc.lease():
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                payload: dict[str, Any] = {"model": model, "input": text, "response_format": "wav"}
-                if voice:
-                    payload["voice"] = voice
-                if speed is not None:
-                    payload["speed"] = speed
-                if language:
-                    payload["language"] = language
-                resp = await _post_with_retry(
-                    client, f"{self.proc.base_url}/v1/audio/speech", json=payload
-                )
-                return resp.content
+            payload: dict[str, Any] = {"model": model, "input": text, "response_format": "wav"}
+            if voice:
+                payload["voice"] = voice
+            if speed is not None:
+                payload["speed"] = speed
+            # Not every TTS family declares a `language` option; the ones that do
+            # not reject the whole request instead of ignoring the field.
+            if language and self.supports_language(model):
+                payload["language"] = language
+            if options:
+                payload["options"] = options
+            resp = await _post_with_retry(
+                self.proc.http(), f"{self.proc.base_url}/v1/audio/speech", json=payload, timeout=timeout
+            )
+            return resp.content
 
     async def loaded_models(self) -> list[dict[str, Any]]:
         if not self.proc.running:
             return []
         try:
-            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
-                resp = await client.get(f"{self.proc.base_url}/v1/models")
-                resp.raise_for_status()
-                return resp.json().get("data", [])
+            resp = await self.proc.http().get(f"{self.proc.base_url}/v1/models", timeout=5.0)
+            resp.raise_for_status()
+            return resp.json().get("data", [])
         except httpx.HTTPError:
             return []
 

@@ -27,6 +27,7 @@ public:
     void showExpanded();
 
 public slots:
+    void setLiveRecording(bool recording);   // live sessions flip the mic badge
     void toggleDictation(bool reviewMode);
     void startDictation(bool reviewMode);
     void stopDictation();
@@ -88,6 +89,10 @@ private:
     QPushButton *micButton_ = nullptr;
     QPushButton *placementButton_ = nullptr;
     QPushButton *expandButton_ = nullptr;
+    QPushButton *liveButton_ = nullptr;
+    QPushButton *meetingButton_ = nullptr;
+    QPushButton *voiceButton_ = nullptr;
+    QPushButton *subtitlesButton_ = nullptr;
     QPushButton *settingsButton_ = nullptr;
     QPushButton *insertButton_ = nullptr;
     QPushButton *copyButton_ = nullptr;
@@ -111,6 +116,7 @@ private:
 
     bool expanded_ = false;
     bool recording_ = false;
+    bool liveRecording_ = false;
     bool finishing_ = false;
     bool reviewMode_ = true;
     bool sessionActive_ = false;

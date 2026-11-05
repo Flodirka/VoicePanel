@@ -28,14 +28,20 @@ DEFAULTS: dict[str, Any] = {
         "request_timeout_s": 300,
     },
     "asr": {
-        "default": "qwen3-asr",
+        "default": "nemotron",     # fastest measured recogniser (0.41-0.46 RTF CPU)
     },
     "tts": {
-        "default": "auto",         # auto = Kokoro for English; Cyrillic -> clone model + profile
-        "clone_model": "qwen3-tts-clone",   # cloning model recorded for new voice profiles
+        "default": "auto",         # auto = Kokoro (en) / Piper ru built-ins; clone profiles on explicit voice
+        "clone_model": "omnivoice-q8",   # OmniVoice 0.6B Q8_0 (~945 MB, 600+ languages, zero-shot clone) via omnivoice.cpp. Alternative: qwen3-tts-clone (1.9 GB, ru/en only) via audio.cpp.
+        "default_voices": {"en": "", "ru": ""},
     },
     "llm": {
         "enabled": True,
+        # Correction-mode sentences with no dictionary fixes and no spell-checker
+        # flags are returned unchanged without calling the model (see
+        # api/text.py). Default on: most dictated sentences are already clean, and
+        # skipping the model is what makes a small corrector fast enough.
+        "skip_if_clean": True,
     },
     "sessions": {
         "vad_model": "runtime/models/silero_vad.onnx",
@@ -71,10 +77,12 @@ DEFAULTS: dict[str, Any] = {
             "espeak_data": "runtime/third_party/espeak-ng/eSpeak NG/espeak-ng-data",
             "voice_dir": "runtime/voice-library",   # zero-shot cloning profiles (see /v1/voices)
             "models": [
+                # Fastest bilingual recogniser measured (0.41-0.46 RTF on CPU).
+                # Punctuates in English only, so pair it with cleanup on demand.
                 {
-                    "id": "qwen3-asr",
-                    "family": "qwen3_asr",
-                    "path": "runtime/models/qwen3-asr-0.6b-q8_0.gguf",
+                    "id": "nemotron",
+                    "family": "nemotron_asr",
+                    "path": "runtime/models/nemotron-3.5-asr-streaming-0.6b-q8_0.gguf",
                     "task": "asr",
                     "mode": "offline",
                     "language": "auto",
@@ -86,14 +94,63 @@ DEFAULTS: dict[str, Any] = {
                     "task": "tts",
                     "mode": "offline",
                     "voice": "af_heart",
+                    "language": "en",      # routing hint only; not sent to the server for tts
+                },
+                # Small fixed-speaker Russian voices (62 MB each, CPU, main
+                # process): the defaults for Russian speech so a clone model is
+                # not loaded just to read a sentence. Cloning stays available
+                # for profiles via the clone engine on demand.
+                {
+                    "id": "piper-ru",
+                    "family": "piper_tts",
+                    "path": "runtime/models/piper-ru-ruslan-medium.gguf",
+                    "task": "tts",
+                    "mode": "offline",
+                    "language": "ru",      # routing hint only
+                    "supports_language": False,
+                },
+                {
+                    "id": "piper-ru-female",
+                    "family": "piper_tts",
+                    "path": "runtime/models/piper-ru-irina-medium.gguf",
+                    "task": "tts",
+                    "mode": "offline",
+                    "language": "ru",      # routing hint only
+                    "supports_language": False,
                 },
             ],
         },
-        # Zero-shot cloning runs in its own process so ASR and the built-in
-        # voices can stay on the CPU. The GPU helper is started by the first
-        # cloning request and stopped again after idle_stop_s (VRAM freed).
-        "audiocpp_clone": {
+        # Speaker separation runs in its own process so it can be placed on the
+        # GPU while recognition stays on the CPU (or the reverse).
+        "audiocpp_diar": {
             "enabled": True,
+            "binary": "runtime/bin/audiocpp-cpu/audiocpp_server.exe",
+            "backend": "cpu",
+            "device": 0,
+            "threads": 8,
+            "host": "127.0.0.1",
+            "port": 8105,
+            "lazy_load": True,
+            "idle_unload_ms": 120000,
+            "max_loaded_models": 1,
+            "start_timeout_s": 90,
+            "models": [
+                {
+                    "id": "nemotron-diar",
+                    "family": "nemotron_3_diar",
+                    "path": "runtime/models/nemotron-3-diarization-q8_0.gguf",
+                    "task": "diar",
+                    "mode": "offline",
+                },
+            ],
+        },
+        # Zero-shot cloning runs in its own engine so ASR and the built-in
+        # voices can stay on the CPU. The default engine is omnivoice.cpp
+        # (section `omnivoice` below). `audiocpp_clone` is the audio.cpp-based
+        # qwen3-tts-clone ALTERNATIVE: enable it, disable `omnivoice`, and set
+        # tts.clone_model to qwen3-tts-clone to switch back.
+        "audiocpp_clone": {
+            "enabled": False,
             "binary": "runtime/bin/audiocpp-cuda/audiocpp_server.exe",
             "backend": "cuda",
             "device": 0,
@@ -119,6 +176,36 @@ DEFAULTS: dict[str, Any] = {
                 },
             ],
         },
+        # The default cloning engine: k2-fsa omnivoice.cpp driving OmniVoice
+        # 0.6B Q8_0 (~945 MB total, 600+ languages, zero-shot cloning; weights
+        # CC-BY-NC 4.0 - download them yourself, see README). A stdin/stdout
+        # CLI rather than an HTTP server, so the service supervises it through
+        # backends/omnivoice.py. The `clone` compute group swaps `binary`/
+        # `codec_binary` between the omnivoice-cpu and omnivoice-cuda builds.
+        "omnivoice": {
+            "enabled": True,
+            "binary": "runtime/bin/omnivoice-cpu/omnivoice-tts.exe",
+            "codec_binary": "runtime/bin/omnivoice-cpu/omnivoice-codec.exe",
+            "backend": "cpu",
+            "threads": 8,
+            "steps": 32,               # MaskGIT decode steps; fewer is faster, lower quality
+            "voice_dir": "runtime/voice-library",
+            "idle_stop_s": 300,        # stop the child (frees ~1 GB RAM) when idle
+            "start_timeout_s": 120,
+            "request_timeout_s": 600,  # per request; CPU RTF is ~10-24 under load
+            "max_line_chars": 300,     # texts are split into sentence lines first
+            "models": [
+                {
+                    "id": "omnivoice-q8",
+                    "family": "omnivoice",
+                    "path": "runtime/models/omnivoice/omnivoice-base-Q8_0.gguf",
+                    "codec_path": "runtime/models/omnivoice/omnivoice-tokenizer-Q8_0.gguf",
+                    "task": "tts",
+                    "mode": "offline",
+                    "language": "auto",
+                },
+            ],
+        },
         "whisper": {
             "enabled": True,
             "binary": "runtime/bin/whisper-cpu/Release/whisper-server.exe",
@@ -132,6 +219,9 @@ DEFAULTS: dict[str, Any] = {
             "extra_args": [],
         },
         "llama": {
+            # Small GEC corrector (563 MB). The service always sends
+            # enable_thinking=false, which this model needs (thinking mode
+            # produces empty/wrong output — measured).
             "binary": "runtime/bin/llama-vulkan/llama-server.exe",
             "variant_dirs": [          # first existing variant wins; enables cuda->vulkan->cpu fallback
                 "runtime/bin/llama-cuda",
@@ -139,14 +229,45 @@ DEFAULTS: dict[str, Any] = {
             ],
             "host": "127.0.0.1",
             "port": 8103,
-            "model_path": "runtime/models/qwen3-4b-instruct-2507-q4_k_m.gguf",
-            "model_alias": "qwen3-4b",
+            "model_path": "runtime/models/Qwen3.5-0.8B-GEC-KAZ-RUS-ENG.Q4_0.gguf",
+            "model_alias": "gec-0.8b",
             "ctx_size": 8192,
             "gpu_layers": 0,
             "flash_attn": True,
             "threads": 8,
+            # llama-server keeps old prompt states in a host-RAM cache that
+            # defaults to 8192 MiB. One dictation slot needs a few at most.
+            "cache_ram_mib": 512,
+            "cache_type_k": None,      # None = llama.cpp default (f16); q8_0 halves KV memory
+            "cache_type_v": None,
             "start_timeout_s": 180,
-            "idle_stop_s": 900,
+            "idle_stop_s": 300,        # free RAM soon after a session ends
+            "extra_args": [],
+        },
+        # Dedicated small translator: translation modes route here, correction
+        # stays on `llama`. Base: PLaMo 3 Translate 0.8B Q4_K_M (573 MB), verified
+        # in the full app flow (context/glossary via template kwargs, see
+        # template_style below). Hy-MT2-1.8B Q4_K_M (1.1 GB) is the alternative -
+        # swap model_path/model_alias and drop template_style to use it.
+        "llama_translate": {
+            "enabled": True,
+            "binary": "runtime/bin/llama-vulkan/llama-server.exe",
+            "variant_dirs": [
+                "runtime/bin/llama-cuda",
+                "runtime/bin/llama-vulkan",
+            ],
+            "host": "127.0.0.1",
+            "port": 8106,
+            "model_path": "runtime/models/plamo-3-translate/plamo-3-translate-0.8b-Q4_K_M.gguf",
+            "model_alias": "plamo-3-translate-0.8b",
+            "template_style": "plamo",
+            "ctx_size": 8192,
+            "gpu_layers": 0,
+            "flash_attn": True,
+            "threads": 8,
+            "cache_ram_mib": 512,
+            "start_timeout_s": 180,
+            "idle_stop_s": 300,
             "extra_args": [],
         },
     },

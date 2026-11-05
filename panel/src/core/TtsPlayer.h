@@ -35,6 +35,13 @@ public:
     void setPauseMs(int ms) { pauseMs_ = qBound(0, ms, 2000); }
     int pauseMs() const { return pauseMs_; }
 
+    // -1 = system default (WAVE_MAPPER). Any other value is a waveOut device
+    // index, which is how the interpreter reaches a virtual cable such as
+    // "CABLE Input" without changing the system default device.
+    void setOutputDevice(int id);
+    int outputDevice() const { return outputDevice_; }
+    static QList<QPair<int, QString>> listOutputDevices();
+
     bool speaking() const;
     void speak(const QString &text);      // split into sentences and start playing
     void stop();                          // cancel playback and clear the queue
@@ -103,6 +110,7 @@ private:
 
     int deviceRate_ = 0;
     int deviceChannels_ = 0;
+    int outputDevice_ = -1;
     void *waveOut_ = nullptr;         // HWAVEOUT
 };
 

@@ -15,6 +15,14 @@ def test_hints_reach_the_prompt_and_stay_suggestions() -> None:
     assert "never change names, paths, commands, versions or identifiers" in system
 
 
+def test_checker_proposed_replacement_is_marked_as_such() -> None:
+    # CORRECTIVE_ACTION_REPLACE from the Windows checker arrives as `proposed`:
+    # it leads the suggestion list and is labelled, so the model treats it as
+    # the checker's own grammar-style fix rather than a random option.
+    system = _system("this are a test", spelling=[{"word": "are", "suggestions": [], "proposed": "is"}])
+    assert '- "are" -> is (the spell checker itself proposes this replacement)' in system
+
+
 def test_no_hints_no_section() -> None:
     assert "spell checker flagged" not in _system("this is fine")
 

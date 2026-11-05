@@ -48,23 +48,28 @@ class WhisperBackend:
         verbose=True asks whisper.cpp for its verbose_json (segments with
         timestamps + detected language + duration).
         """
-        async with self.proc.lease() as lease:  # noqa: F841
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                data = {
-                    "response_format": "verbose_json" if verbose else "json",
-                    "temperature": str(temperature),
-                }
-                if language:
-                    data["language"] = language
-                if prompt:
-                    data["prompt"] = prompt
-                resp = await client.post(
-                    f"{self.proc.base_url}/inference",
-                    files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                    data=data,
-                )
-                resp.raise_for_status()
-                return resp.json()
+        async with self.proc.lease():
+            data = {
+                "response_format": "verbose_json" if verbose else "json",
+                "temperature": str(temperature),
+            }
+            if language:
+                data["language"] = language
+            if prompt:
+                data["prompt"] = prompt
+            kwargs: dict[str, Any] = {
+                "files": {"file": ("audio.wav", wav_bytes, "audio/wav")},
+                "data": data,
+                "timeout": timeout,
+            }
+            url = f"{self.proc.base_url}/inference"
+            try:
+                resp = await self.proc.http().post(url, **kwargs)
+            except httpx.RemoteProtocolError:
+                # stale pooled keep-alive connection; the server never saw it
+                resp = await self.proc.http().post(url, **kwargs)
+            resp.raise_for_status()
+            return resp.json()
 
     async def stop(self) -> None:
         await self.proc.stop()

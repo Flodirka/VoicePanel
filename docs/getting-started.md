@@ -17,19 +17,29 @@ The Python dependencies, inference engines and model weights are separate third-
 ## 2. Verified runtime downloads
 
 ```powershell
-# Recognition, built-in English speech, LLM, Whisper and engine variants:
+# Recognition, built-in speech, LLM, Whisper and engine variants:
 python tools/download_runtime.py --group runtime
 
 # ONNX Runtime C++ SDK and Silero VAD:
 python tools/download_runtime.py --group extras
 
-# Optional CUDA voice-cloning helper and its model:
+# Optional: the audio.cpp CUDA build and the qwen3-tts-clone alternative model:
 python tools/download_runtime.py --group clone
 ```
 
 Downloads can be several gigabytes. The URLs and SHA-256 values are pinned in `tools/downloads.lock.json`. Model URLs use immutable repository revisions. Each file must match its locked hash before an archive is extracted. Cached files are verified too; a mismatch stops the process. Extraction rejects paths outside the destination and symlinks. The downloader does not bypass TLS checks, run downloaded binaries, or fetch a script and execute it.
 
 The `--verify-only` option checks files already present without downloading or extracting. The shell scripts remain compatibility entry points for the same verified Python downloader.
+
+The default **cloning engine** is not part of the locked downloads: it is the
+k2-fsa omnivoice.cpp engine built from source (see
+[Models](models.md#where-to-download)), driving the OmniVoice Q8 weights you
+download yourself from Hugging Face into `runtime/models/omnivoice/`
+(`omnivoice-base-Q8_0.gguf` + `omnivoice-tokenizer-Q8_0.gguf`, ~945 MB total,
+CC-BY-NC weights). The CPU build is enough to try cloning; the CUDA build
+(runtime/bin/omnivoice-cuda, plus cuBLAS/cudart runtime DLLs) is the
+real-time option. The downloader's `--group clone` installs the audio.cpp
+alternative instead.
 
 ## 3. Local configuration
 
@@ -46,15 +56,17 @@ backends:
     variant_dirs:
       - runtime/bin/llama-cpu
     gpu_layers: 0
-  audiocpp_clone:
-    enabled: false
+  omnivoice:
+    binary: runtime/bin/omnivoice-cpu/omnivoice-tts.exe
+    codec_binary: runtime/bin/omnivoice-cpu/omnivoice-codec.exe
+    backend: cpu
 ```
 
 These are edits to the corresponding blocks, not a replacement for the full sample file. Main ASR and built-in speech already use `runtime/bin/audiocpp-cpu/audiocpp_server.exe`. The configured Whisper server is `runtime/bin/whisper-cpu/Release/whisper-server.exe`. Check the extracted archive layout against these paths.
 
 Kokoro may also need eSpeak NG on the system. The sample points to `runtime/third_party/espeak-ng/eSpeak NG/`; install it from [the upstream eSpeak NG project](https://github.com/espeak-ng/espeak-ng) or update `espeak_lib` and `espeak_data` to your installation. The downloader does not install eSpeak NG. Model and voice selection is described in [CPU and GPU configuration](compute-profiles.md).
 
-Optional cloned speech needs the cloning model and a reference recording you have the right to use. The sample cloning helper uses CUDA. Do not enable it until its binaries, runtime libraries and model are installed. Keep personal references under the ignored runtime directory.
+Optional cloned speech needs the cloning engine (omnivoice.cpp + the OmniVoice weights you download; see [Models](models.md)) and a reference recording you have the right to use. The CPU engine build works everywhere; the CUDA build is the real-time option and needs the cuBLAS/cudart runtime DLLs beside it. Keep personal references under the ignored runtime directory.
 
 ## 4. Build and start
 
@@ -74,6 +86,27 @@ The executable is written to `panel/build/bin/VoicePanel.exe`. The build script 
 
 Check `http://127.0.0.1:8080/health` for service health. A healthy gateway does not mean every model is installed or loaded. Backend logs remain under `runtime/logs/` on your machine.
 
+## 4a. Distributable bundle and in-workflow verification
+
+```powershell
+.\tools\package_release.ps1 -CpuOnly                 # dist\VoicePanel, CPU-only engines and models
+.\tools\package_release.ps1 -Zip                     # also dist\VoicePanel-<version>.zip + .sha256
+```
+
+The bundle is one self-contained folder: `VoicePanel.exe` with the Qt runtime beside it, `service/`, `tools/`, `runtime/` (engine binaries, models, eSpeak/ONNX), `config.example.yaml`, and the licenses. Copy `config.example.yaml` to `config.yaml` and edit it inside the bundle.
+
+Two checks run against the bundle as shipped:
+
+```powershell
+cd dist\VoicePanel
+.\VoicePanel.exe --check-bundle        # PASS/FAIL per part, written to check-bundle.txt; never opens the mic
+python tools\run_service.py            # start the bundled service
+python tools\verify_workflow.py --base http://127.0.0.1:8080 --audio my-recording.wav `
+    --dictionary my-terms.txt        # one term per line; optional --context context.md
+```
+
+`verify_workflow.py` replays the panel's real dictation chain — WAV to `/v1/audio/transcriptions`, sentence split, then `/v1/text/process` per sentence with the user dictionary — so the deterministic pre-pass (near-miss fixes of terminology, reported in `notes`) and the `llm.skip_if_clean` gate (clean sentences return with `model: null` and no model call) are exercised on real recogniser output, not hand-written text.
+
 ## 5. First dictation
 
 Open a text field in Notepad. Press Ctrl+Alt+D, speak, pause, and continue. Completed processed text should arrive while capture stays active. Press the shortcut again and wait for the remaining work. Use Ctrl+Alt+R when you want Preview and confirmation before insertion. The shortcuts are configurable in Settings.
@@ -83,6 +116,42 @@ Accept and Reject apply to all current corrections in one click. Quick dictation
 Panel auto-save is enabled by default. It writes stable text and reviewed edits to your selected folder, or to `transcripts` in VoicePanel's local application-data directory when no folder is selected. Settings shows the effective folder. Disable auto-save to prevent automatic transcript-file writes; History then remains in memory until the panel exits.
 
 Review the remembered target and use Copy if the field rejects insertion. A normal application cannot inject input into every elevated or protected field. Do not run VoicePanel as administrator merely to avoid that boundary.
+
+## 6. Sending the translated voice into a call (optional)
+
+Listening and dictation need no extra software. VoicePanel captures a call per
+application (Windows 10 2004 or newer) or per output device, and types the text
+into the focused field.
+
+Sending your **translated voice** to another application is different. A capture
+endpoint that other programs can select as a microphone can only be created by
+an audio driver, so VoicePanel cannot provide one from user mode. Use a virtual
+audio cable:
+
+1. Get a virtual cable. Check the Windows **Recording** tab first: audio
+   interfaces often install a pair already (`Chat Input (Maono Arena)` next to
+   `Chat Output`, `Stream Input` next to `Virtual Output`). If nothing pairs
+   with a playback endpoint, install [VB-CABLE](https://vb-audio.com/Cable/)
+   (free driver; restart Windows once) which adds `CABLE Input` and
+   `CABLE Output`.
+2. In VoicePanel, open **Live**, expand **Settings**, and set
+   **My voice goes to** to the cable's playback endpoint (`Chat Output
+   (Maono Arena)`, `CABLE Input`, …).
+3. In the call or recorder application, select the matching recording endpoint
+   (`Chat Input (Maono Arena)`, `CABLE Output`, …) as its microphone. That
+   application now hears the synthesized voice.
+4. Leave **My microphone** on the real microphone, and keep **Call audio** on
+   the application or device that plays the call. Do not route the call's own
+   output back into the cable, or the far end will hear itself.
+
+VoicePanel does not bundle or redistribute VB-CABLE; its terms are VB-Audio's.
+Any other virtual cable behaves the same way (VoiceMeeter, Virtual Audio Cable,
+or the endpoints some audio interfaces install), as long as it exposes a
+playback endpoint and a matching recording endpoint.
+
+To check the routing before a call, press **Preview**: it speaks one sentence
+into the selected device, so `CABLE Output` should show a level in the other
+application.
 
 ## Network and privacy
 

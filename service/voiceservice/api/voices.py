@@ -67,7 +67,7 @@ async def create_voice(
             audio_bytes=audio,
             reference_text=reference_text,
             language=language,
-            model=registry.cfg.get("tts", {}).get("clone_model", "qwen3-tts-clone"),
+            model=registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8"),
         )
     except VoiceProfileError as exc:
         raise HTTPException(400, str(exc))
@@ -133,6 +133,8 @@ async def preview_voice(
         raise HTTPException(502, f"cloning TTS error: {exc.response.text[:300]}")
     except httpx.HTTPError as exc:
         raise HTTPException(504, f"cloning TTS unreachable: {exc}")
+    except RuntimeError as exc:          # the omnivoice engine reports via RuntimeError
+        raise HTTPException(502, f"cloning TTS error: {exc}")
     return Response(
         content=audio,
         media_type="audio/wav",
@@ -143,8 +145,13 @@ async def preview_voice(
 async def _synth_with_voice(
     registry: Registry, profile: dict[str, Any], text: str, language: str
 ) -> bytes:
-    """Synthesize with a cloned profile: the cloning model + voice library name."""
-    model = profile.get("model") or "qwen3-tts-clone"
+    """Synthesize with a cloned profile: the cloning model + voice library name.
+
+    Works for both engines: audio.cpp resolves the voice server-side from the
+    voice library, omnivoice.cpp reads the profile's reference itself (with a
+    pre-encoded .rvq cache).
+    """
+    model = profile.get("model") or registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8")
     backend = registry.tts_backend(model)
     async with registry._tts_lock:
         return await backend.speech(

@@ -3,7 +3,7 @@
 Protocol (client -> server):
   * binary frames: PCM16LE mono 16 kHz audio chunks (any size; re-chunked to 512)
   * text frames (JSON):
-      {"type":"config", "model": "qwen3-asr", "language": "auto", ...}   optional
+      {"type":"config", "model": "nemotron", "language": "auto", ...}   optional
       {"type":"pause"} / {"type":"resume"}
       {"type":"finish"}   end the session; pending audio is finalized
       {"type":"cancel"}   drop everything and close
@@ -32,6 +32,138 @@ from ..vad import FRAME_SAMPLES, LiveTranscription, SileroVAD
 router = APIRouter()
 
 
+@router.websocket("/v1/sessions/stream")
+async def stream_session(ws: WebSocket) -> None:
+    """Relay live PCM to the engine and push transcript events back.
+
+    The panel sends 16 kHz mono PCM16 frames as binary messages and reads JSON
+    events. The engine keeps the encoder work it has already done, so the final
+    arrives shortly after the last frame instead of after a full batch run
+    (measured 465-523 ms against 2.6-3.0 s for a 6.4 s utterance on CPU).
+
+    Client -> server:
+      * binary frames: PCM16LE mono at the declared sample rate
+      * {"type":"finish"} closes the stream and waits for the final event
+      * {"type":"cancel"} drops everything
+    Server -> client:
+      * {"type":"ready","model":...,"sample_rate":...}
+      * the engine's own events (transcript.text.delta / .done) verbatim
+      * {"type":"done"} after the final, {"type":"error","message":...} on failure
+    """
+    await ws.accept()
+    registry = ws.app.state.registry
+    params = ws.query_params
+    language = params.get("language") or None
+    try:
+        sample_rate = int(params.get("sample_rate", 16000))
+    except ValueError:
+        sample_rate = 16000
+    try:
+        backend, model_id = registry.resolve_asr(params.get("model"))
+    except KeyError as exc:
+        await ws.send_json({"type": "error", "message": str(exc)})
+        await ws.close()
+        return
+    if backend != "audiocpp":
+        await ws.send_json({"type": "error", "message": "streaming needs an audio.cpp model"})
+        await ws.close()
+        return
+    entry = registry.audiocpp.models.get(model_id, {})
+    if entry.get("mode") != "streaming":
+        await ws.send_json({
+            "type": "error",
+            "message": (
+                f"model '{model_id}' is configured with mode: "
+                f"{entry.get('mode', 'offline')}; set mode: streaming to use this route"
+            ),
+        })
+        await ws.close()
+        return
+
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    finished = asyncio.Event()
+
+    async def pcm_source():
+        while True:
+            item = await queue.get()
+            if item is None:
+                return
+            yield item
+
+    async def pump() -> None:
+        try:
+            async for line in registry.audiocpp.transcribe_live(
+                pcm_source(),
+                model=model_id,
+                language=language,
+                sample_rate=sample_rate,
+                channels=1,
+            ):
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    event = json.loads(payload)
+                except ValueError:
+                    continue
+                await ws.send_json(event)
+            await ws.send_json({"type": "done"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported to the client, session survives
+            try:
+                await ws.send_json({"type": "error", "message": str(exc)})
+            except Exception:
+                pass
+        finally:
+            finished.set()
+
+    await ws.send_json({"type": "ready", "model": model_id, "sample_rate": sample_rate})
+    async with registry._asr_lock:      # one live stream at a time, as for batch requests
+        task = asyncio.create_task(pump())
+        try:
+            while True:
+                message = await ws.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                if (data := message.get("bytes")) is not None:
+                    if data:
+                        queue.put_nowait(data)
+                    continue
+                text = message.get("text") or ""
+                if not text:
+                    continue
+                try:
+                    control = json.loads(text)
+                except ValueError:
+                    await ws.send_json({"type": "error", "message": "invalid JSON control frame"})
+                    continue
+                kind = control.get("type")
+                if kind in ("finish", "close", "eos"):
+                    queue.put_nowait(None)
+                    try:
+                        await asyncio.wait_for(finished.wait(), timeout=120)
+                    except asyncio.TimeoutError:
+                        await ws.send_json({"type": "error", "message": "no final from the engine"})
+                    break
+                if kind == "cancel":
+                    queue.put_nowait(None)
+                    break
+                if kind == "config" and control.get("language"):
+                    language = str(control["language"])
+        except WebSocketDisconnect:
+            pass
+        finally:
+            queue.put_nowait(None)
+            if not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=10)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    task.cancel()
+
+
 @router.websocket("/v1/sessions/dictation")
 async def dictation_session(ws: WebSocket) -> None:
     await ws.accept()
@@ -51,9 +183,9 @@ async def dictation_session(ws: WebSocket) -> None:
                 model_cfg = m
                 if m["id"] == cfg.get("asr_model"):
                     break
-        asr_model = (cfg.get("asr_model") or (model_cfg or {}).get("id") or "qwen3-asr")
+        asr_model = (cfg.get("asr_model") or (model_cfg or {}).get("id") or registry.cfg["asr"]["default"])
     except Exception:
-        asr_model = "qwen3-asr"
+        asr_model = "nemotron"
     language: str | None = None
     paused = False
     session_started = time.monotonic()
@@ -78,11 +210,13 @@ async def dictation_session(ws: WebSocket) -> None:
         except Exception:
             pass
 
+    min_speech_frames = int(cfg.get("min_speech_frames", 6))
     live = LiveTranscription(
         asr_request,
         preview,
         speech_threshold=float(cfg.get("speech_threshold", 0.5)),
         preroll_frames=int(cfg.get("preroll_frames", 11)),
+        min_speech_frames=min_speech_frames,
         speculate_every_frames=int(cfg.get("speculate_every_frames", 63)),
         speculative=bool(cfg.get("speculative", True)),
     )
@@ -90,19 +224,50 @@ async def dictation_session(ws: WebSocket) -> None:
     speech_start_s: float | None = None
     buffer = np.zeros(0, dtype=np.float32)
     max_utterance_s = float(cfg.get("max_utterance_s", 30.0))
-    min_speech_frames = int(cfg.get("min_speech_frames", 6))
     silence_frames_needed = int(cfg.get("silence_frames", 24))
 
+    # Finals are recognised in the background so audio intake and VAD keep
+    # running while an utterance is transcribed. A chain of sender tasks keeps
+    # the final events in utterance order.
+    last_sender: asyncio.Task | None = None
+    pending: set[asyncio.Task] = set()
+
+    def _track(task: asyncio.Task) -> asyncio.Task:
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+        return task
+
     async def finalize(segment) -> None:
-        nonlocal speech_start_s
+        nonlocal speech_start_s, last_sender
         if segment is None:
             return
-        text = await live.finish(segment)
         speech_start_s = None
-        try:
-            await ws.send_json({"type": "final", "text": text, "t_offset_s": t_offset()})
-        except Exception:
-            pass
+        recognition = _track(asyncio.create_task(live.finish(segment)))
+        previous = last_sender
+
+        async def send_in_order() -> None:
+            if previous is not None:
+                await previous
+            try:
+                text = await recognition
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - reported, the session continues
+                try:
+                    await ws.send_json({"type": "error", "message": f"transcription failed: {exc}"})
+                except Exception:
+                    pass
+                return
+            try:
+                await ws.send_json({"type": "final", "text": text, "t_offset_s": t_offset()})
+            except Exception:
+                pass
+
+        last_sender = _track(asyncio.create_task(send_in_order()))
+
+    async def drain_finals() -> None:
+        if last_sender is not None:
+            await last_sender
 
     async def process_frame(frame: np.ndarray) -> None:
         nonlocal speech_start_s, buffer
@@ -177,9 +342,12 @@ async def dictation_session(ws: WebSocket) -> None:
                     if live.current is not None:
                         ended = live.speech_ended()
                         await finalize(ended)
+                    await drain_finals()
                     await ws.send_json({"type": "done"})
                     break
                 elif mtype == "cancel":
+                    for task in list(pending):
+                        task.cancel()
                     live.reset()
                     vad.reset()
                     await ws.send_json({"type": "done"})
@@ -194,4 +362,6 @@ async def dictation_session(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        for task in list(pending):
+            task.cancel()
         live.reset()

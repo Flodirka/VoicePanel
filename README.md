@@ -17,6 +17,7 @@
   <a href="#dictate-without-breaking-your-flow">How it works</a> ·
   <a href="#what-is-included">Features</a> ·
   <a href="#run-from-source">Setup</a> ·
+  <a href="#models">Models</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="ROADMAP.md">Roadmap</a> ·
   <a href="docs/ru/README.md">Русский</a>
@@ -79,7 +80,31 @@ Copy-Item config.example.yaml config.yaml
 .\tools\start-panel.ps1
 ```
 
-Main recognition and text processing default to CPU. The optional cloning helper in the sample configuration uses CUDA. Disable that helper or configure its paths before using cloned voices on a machine without CUDA. See [CPU and GPU configuration](docs/compute-profiles.md).
+Main recognition and text processing default to CPU. Cloned-voice TTS runs on
+the omnivoice.cpp engine (OmniVoice 0.6B Q8_0, ~945 MB, 600+ languages); the
+panel's compute switch can place it, recognition and text processing on CUDA —
+that is the real-time mode for calls and the live interpreter. The
+sample configuration keeps the larger `qwen3-tts-clone` (audio.cpp, GPU
+helper) as a documented alternative. See [CPU and GPU configuration](docs/compute-profiles.md).
+
+## Models
+
+VoicePanel ships no weights: you download the models you want and point the
+config at them. The tested set, measured speed on the reference hardware, and
+per-slot swap instructions live in [Models](docs/models.md). Summary:
+
+| Slot | Tested default | Size | Alternatives |
+|---|---|---|---|
+| Recognition | `nemotron-3.5-asr-streaming-0.6b` Q8_0 (RTF 0.41–0.46 CPU) | 931 MB | whisper small/large (timestamps) |
+| Built-in voices | Piper `ruslan` (male) / `irina` (female) for Russian, Kokoro for English | 62–190 MB | any GGUF Piper voice |
+| Cloned voice | OmniVoice 0.6B Q8_0 via omnivoice.cpp — RTF 1.9–6.9 on a (busy) RTX 4060, 13–24 on CPU | 945 MB | qwen3-tts-clone (2 GB, ru/en, GPU helper) |
+| Correction | Qwen3.5-0.8B-GEC Q4_0 (skips clean sentences) | 563 MB | any instruct LLM llama.cpp serves |
+| Translation | PLaMo 3 Translate 0.8B Q4_K_M | 573 MB | Hy-MT2-1.8B (Apache-2.0) |
+| Speaker separation | nemotron-3-diarization Q8_0 | 107 MB | — |
+
+Bigger models work the same way: a slot takes whatever GGUF its engine loads.
+Note the license terms — OmniVoice weights are CC-BY-NC 4.0, so they are a
+download, never a bundled artifact.
 
 ## Local speech API
 
@@ -96,6 +121,32 @@ The default address is `http://127.0.0.1:8080`. Selected endpoints use OpenAI-co
 | `GET /health` | Check service health |
 
 Voice profile and process-control endpoints are documented in the [API reference](docs/api.md). Keep the service on loopback for normal panel use. See [Security](SECURITY.md) before exposing it to other machines.
+
+## Sending your voice into another application
+
+Dictation and call listening need no extra software: the panel captures the
+microphone, and a call either per application (Windows 10 2004 or newer) or per
+output device.
+
+Sending the **translated voice** to a call is the one case that needs a driver:
+a capture endpoint other programs can pick as a microphone cannot be created
+from user mode. You need a *pair* of endpoints — one playback, one recording —
+from any virtual audio cable.
+
+You may already have one. Audio-interface software installs pairs like
+`Chat Output → Chat Input` (Maono Arena) or `Virtual Output → Stream Input`;
+check the Windows **Recording** tab for a matching input before installing
+anything. Otherwise use [VB-CABLE](https://vb-audio.com/Cable/) (free driver,
+restart Windows once), which adds `CABLE Input` and `CABLE Output`.
+
+1. In VoicePanel → **Live** → **Settings**, set **My voice goes to** to the
+   cable's *playback* endpoint (`Chat Output (Maono Arena)`, `CABLE Input`, …).
+2. In the call application, choose the *recording* endpoint of the same cable
+   as its microphone (`Chat Input (Maono Arena)`, `CABLE Output`, …).
+
+VoicePanel does not bundle or redistribute any cable driver. The full
+walk-through, including how to verify the routing with **Preview**, is in
+[Getting started](docs/getting-started.md#6-sending-the-translated-voice-into-a-call-optional).
 
 ## Privacy and practical limits
 
@@ -130,7 +181,7 @@ See [Contributing](CONTRIBUTING.md) for development scope and verification expec
 
 ## Credits and license
 
-VoicePanel builds on [audio.cpp](https://github.com/0xShug0/audio.cpp), [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [Silero VAD](https://github.com/snakers4/silero-vad), Qt and ONNX Runtime. Its continuous voice workflow and speech pipeline were informed by [Pithagoras](https://github.com/thecodacus/pithagoras).
+VoicePanel builds on [audio.cpp](https://github.com/0xShug0/audio.cpp), the [OmniVoice](https://github.com/k2-fsa/OmniVoice) engine (omnivoice.cpp, built from source), [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [Silero VAD](https://github.com/snakers4/silero-vad), Qt and ONNX Runtime. Its continuous voice workflow and speech pipeline were informed by [Pithagoras](https://github.com/thecodacus/pithagoras).
 
 Original VoicePanel code is licensed under [MIT](LICENSE). Attributed adaptations, fonts, icons, engines and model weights retain their own terms. Read [Third-party notices](THIRD_PARTY_NOTICES.md). Runtime binaries and model weights are not included in this repository.
 

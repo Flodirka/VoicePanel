@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 
@@ -22,8 +23,21 @@ void Settings::load() {
         QStandardPaths::AppDataLocation) + "/context.md").toString();
     loadContext();
     asrModel = s.value("asrModel", asrModel).toString();
+    meetingModel = QStringLiteral("nemotron-diar");
+    meetingDiarize = s.value("meetingDiarize", meetingDiarize).toBool();
+    meetingAutoSave = s.value("meetingAutoSave", meetingAutoSave).toBool();
+    meetingTranscriptDir = s.value("meetingTranscriptDir", meetingTranscriptDir).toString();
+    subtitlesDisplay = s.value("subtitlesDisplay", subtitlesDisplay).toInt();
+    subtitlesTextSize = s.value("subtitlesTextSize", subtitlesTextSize).toInt();
+    meetingLanguage = s.value("meetingLanguage", meetingLanguage).toInt();
+    liveOutgoing = s.value("liveOutgoing", liveOutgoing).toInt();
+    callLanguage = s.value("callLanguage", callLanguage).toInt();
+    speakCaptions = s.value("speakCaptions", speakCaptions).toBool();
+    subtitlesLanguage = s.value("subtitlesLanguage", subtitlesLanguage).toInt();
     language = "auto";
     inputDevice = s.value("inputDevice", inputDevice).toString();
+    systemAudioDevice = s.value("systemAudioDevice", systemAudioDevice).toString();
+    outputDevice = s.value("outputDevice", outputDevice).toInt();
     vadModel = s.value("vadModel", vadModel).toString();
 
     speechThreshold = s.value("speechThreshold", speechThreshold).toDouble();
@@ -73,8 +87,21 @@ void Settings::save() const {
     s.setValue("profile", profile);
     s.setValue("contextDocument", contextDocument);
     s.setValue("asrModel", asrModel);
+    s.setValue("meetingModel", meetingModel);
+    s.setValue("meetingDiarize", meetingDiarize);
+    s.setValue("meetingAutoSave", meetingAutoSave);
+    s.setValue("meetingTranscriptDir", meetingTranscriptDir);
+    s.setValue("subtitlesDisplay", subtitlesDisplay);
+    s.setValue("subtitlesTextSize", subtitlesTextSize);
+    s.setValue("meetingLanguage", meetingLanguage);
+    s.setValue("liveOutgoing", liveOutgoing);
+    s.setValue("callLanguage", callLanguage);
+    s.setValue("speakCaptions", speakCaptions);
+    s.setValue("subtitlesLanguage", subtitlesLanguage);
     s.setValue("language", language);
     s.setValue("inputDevice", inputDevice);
+    s.setValue("systemAudioDevice", systemAudioDevice);
+    s.setValue("outputDevice", outputDevice);
     s.setValue("vadModel", vadModel);
 
     s.setValue("speechThreshold", speechThreshold);
@@ -130,6 +157,33 @@ bool Settings::saveContext(QString *errorOut) const {
         return false;
     }
     return true;
+}
+
+QStringList Settings::termsFromContext(const QString &context) {
+    // A heading whose text names the section in any of the supported languages:
+    //   ## Terminology   /   ## Терминология   /   # Glossary
+    // Inside the section only bullet lines ("- term", "• term", "* term") are
+    // terms, one per line; plain lines are comments. The section ends at the
+    // next heading. Outside it the free text is only prompt context.
+    static const QRegularExpression heading(
+        QStringLiteral("^\\s*#+\\s*.*(terminolog|терминолог|glossary|словарь)"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression anyHeading(QStringLiteral("^\\s*#"));
+    static const QRegularExpression bullet(QStringLiteral("^\\s*[-*•]\\s+"));
+    QStringList terms;
+    bool inSection = false;
+    for (const QString &raw : context.split(QLatin1Char('\n'))) {
+        if (anyHeading.match(raw).hasMatch()) {
+            inSection = heading.match(raw).hasMatch();
+            continue;
+        }
+        if (!inSection) continue;
+        const QRegularExpressionMatch bulletHit = bullet.match(raw);
+        if (!bulletHit.hasMatch()) continue;
+        const QString line = raw.mid(bulletHit.capturedLength()).trimmed();
+        if (!line.isEmpty() && !terms.contains(line, Qt::CaseInsensitive)) terms << line;
+    }
+    return terms;
 }
 
 } // namespace VoicePanel

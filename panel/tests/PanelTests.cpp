@@ -1,12 +1,18 @@
 #include "app/MainWindow.h"
+#include "app/MeetingWindow.h"
+#include "app/SessionWindow.h"
+#include "app/CaptionOverlay.h"
 #include "app/PanelApp.h"
 #include "app/ServerSettingsDialog.h"
 #include "app/SettingsDialog.h"
 #include "app/VoicePlaybackDialog.h"
 #include "app/ServiceTray.h"
+#include "core/AudioMeter.h"
 #include "core/DictationController.h"
+#include "core/LevelBadge.h"
 #include "core/MarkdownStore.h"
 #include "core/ServiceClient.h"
+#include "core/SessionController.h"
 #include "core/Settings.h"
 #include "core/TextProcessor.h"
 #include "core/TtsPlayer.h"
@@ -27,6 +33,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
+#include <QProgressBar>
 #include <QPlainTextEdit>
 #include <QCheckBox>
 #include <QTextBlock>
@@ -603,6 +610,53 @@ private slots:
         QVERIFY(controller.sessionOpen_);
     }
 
+    void periodicSpeculationWaitsForTheSegmentToGrow() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        DictationController controller(&client);
+        controller.sessionOpen_ = controller.inSpeech_ = true;
+        controller.speechFrames_ = 200;
+        controller.revision_ = 200;
+        controller.lastSpeculateFrame_ = 160;      // last request covered 5.1 s
+        controller.segment_.fill(0.1f, 230 * Vad::kFrameSamples);
+        controller.maybeSpeculate();               // +70 frames: past the fixed 63, below 160 / 2
+        QVERIFY(!controller.speculateInFlight_);
+        controller.segment_.fill(0.1f, 240 * Vad::kFrameSamples);
+        controller.maybeSpeculate();               // +80 frames: half the last request
+        QVERIFY(controller.speculateInFlight_);
+        QTRY_COMPARE(server.requests.size(), 1);
+        controller.cancel();
+    }
+
+    void pauseSpeculationIsNotDelayedByTheGrowthRule() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        DictationController controller(&client);
+        controller.sessionOpen_ = controller.inSpeech_ = true;
+        controller.speechFrames_ = controller.revision_ = 200;
+        controller.lastSpeculateFrame_ = 200;
+        controller.silenceFrames_ = 6;             // pause candidate
+        controller.segment_.fill(0.1f, 206 * Vad::kFrameSamples);
+        controller.maybeSpeculate();
+        QTRY_COMPARE(server.requests.size(), 1);
+        controller.cancel();
+    }
+
+    void warmupCarriesModeAndContext() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        client.setContext("Glossary: UCLASS");
+        client.warmup("auto_correct", "general");
+        QTRY_COMPARE(server.requests.size(), 1);
+        const auto request = QJsonDocument::fromJson(server.requests[0]->property("body").toByteArray()).object();
+        QCOMPARE(request.value("mode").toString(), QString("auto_correct"));
+        QCOMPARE(request.value("context").toString(), QString("Glossary: UCLASS"));
+        server.reply(0, R"({"scheduled":["asr","llm"]})");
+    }
+
     void continuousCorrectionReachesPreviewBeforeStop() {
         TestServer server;
         app_->settings()->autoCleanEditor = true;
@@ -873,6 +927,55 @@ private slots:
         const auto russian = checker.check(QString::fromUtf8("привет, ето тест"), "ru");
         QVERIFY(!russian.isEmpty());
         QCOMPARE(russian.first().word, QString::fromUtf8("ето"));
+    }
+
+    void spellCheckerFiltersKnownWords() {
+        // filterKnown is pure: it must drop hints for words the user listed in
+        // their terminology, no matter case or ё/е, and keep the rest.
+        const QStringList known = {QString::fromUtf8("Droppo"), QString::fromUtf8("дропбокс")};
+        QList<SpellingHint> hints = {
+            {QString::fromUtf8("дропбокс"), {}},
+            {QString("droppo"), {"drop"}},
+            {QString("helo"), {"hello"}},
+        };
+        const auto out = SpellingChecker().filterKnown(hints, known);
+        QCOMPARE(out.size(), 1);
+        QCOMPARE(out.first().word, QString("helo"));
+        // An empty list changes nothing.
+        QCOMPARE(SpellingChecker().filterKnown(hints, {}).size(), hints.size());
+    }
+
+    void contextTerminologySectionBecomesTheDictionary() {
+        const QString doc = QStringLiteral(
+            "# Example speech context\n"
+            "Free text with words like dropbox is only prompt context.\n"
+            "\n"
+            "## Terminology\n"
+            "A plain comment line is not a term.\n"
+            "- dropbox\n"
+            "- дропбокс\n"
+            "• Godot\n"
+            "- Dropbox\n"   // duplicate, different case
+            "\n"
+            "## Other section\n"
+            "- not a term\n");
+        const QStringList terms = Settings::termsFromContext(doc);
+        QCOMPARE(terms, QStringList({QStringLiteral("dropbox"), QString::fromUtf8("дропбокс"), QStringLiteral("Godot")}));
+        // No section: nothing is a term, even if the free text mentions words.
+        QVERIFY(Settings::termsFromContext(QStringLiteral("dropbox everywhere, no heading")).isEmpty());
+        QVERIFY(Settings::termsFromContext(QString()).isEmpty());
+    }
+
+    void checkBundleReportsEveryPartWithoutStartingTheApp() {
+        // --check-bundle: no window, tray or microphone; with the fake service
+        // answering /health the whole packaged app must report OK.
+        TestServer server;
+        app_->settings()->serviceUrl = server.url();
+        app_->service()->setBaseUrl(server.url());
+        QCOMPARE(app_->runCheckBundle(), 0);
+        // A dead service is a FAIL, not a crash and not a hang.
+        app_->settings()->serviceUrl = "http://127.0.0.1:1";
+        QCOMPARE(app_->runCheckBundle(), 1);
     }
 
     void silenceStartsANewTranscriptWithoutStoppingTheMicrophone() {
@@ -1334,7 +1437,7 @@ private slots:
         QVERIFY(menu);
         QCOMPARE(menu->actions().size(), 5);
         const auto buttons = window.compactBar_->findChildren<QPushButton *>();
-        QCOMPARE(buttons.size(), 5);
+        QCOMPARE(buttons.size(), 9);   // placement, mic, preview, live, meeting, voice, subtitles, settings, close
         for (auto *control : buttons) {
             QCOMPARE(control->size(), QSize(36, 36));
             QCOMPARE(control->mapTo(&window, control->rect().center()).x(), window.rect().center().x());
@@ -1382,8 +1485,170 @@ private slots:
         modalGuard.stop();
         QVERIFY2(warning.isEmpty(), qPrintable(warning));
         QCOMPARE(dialog.result(), int(QDialog::Accepted));
-        QCOMPARE(app_->hotkeys()->count(), 3);
+        // The three dictation hotkeys are required; the two live-mode
+        // hotkeys are optional because another application may own them.
+        QVERIFY(app_->hotkeys()->contains(app_->settings()->insertHotkey));
+        QVERIFY(app_->hotkeys()->contains(app_->settings()->insertHotkey2));
+        QVERIFY(app_->hotkeys()->contains(app_->settings()->saveHotkey));
+        QVERIFY(app_->hotkeys()->count() >= 3);
         app_->hotkeys()->unregisterAll();
+    }
+
+    void interpreterTurnsIncomingSpeechIntoARussianCaption() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TtsPlayer tts(&client);
+        SessionController control(&client, &tts);
+        Settings settings;
+        control.configure(settings, SessionController::Mode::Interpreter);
+        control.running_ = true;
+        QSignalSpy captions(&control, &SessionController::caption);
+
+        QVector<float> samples(8000, 0.05f);
+        control.onUtterance(true, samples, 2.0);
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, "{\"text\":\"hello there\"}");
+        QTRY_COMPARE(server.requests.size(), 2);
+        const auto payload = QJsonDocument::fromJson(server.requests[1]->property("body").toByteArray()).object();
+        QCOMPARE(payload.value("mode").toString(), QString("translate_en_ru"));
+        server.reply(1, "{\"result\":\"привет\"}");
+        QTRY_COMPARE(captions.size(), 1);
+        // The caption carries both columns: what was heard, what it became.
+        QCOMPARE(captions.first().at(0).toString(), QString("hello there"));
+        QCOMPARE(captions.first().at(1).toString(), QString::fromUtf8("привет"));
+        control.stop();
+    }
+
+    void meetingLabelsTheActiveSourceAndKeepsTimestamps() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TtsPlayer tts(&client);
+        SessionController control(&client, &tts);
+        Settings settings;
+        control.configure(settings, SessionController::Mode::Meeting);
+        control.running_ = true;
+        QSignalSpy lines(&control, &SessionController::line);
+
+        QVector<float> samples(8000, 0.05f);
+        control.onUtterance(false, samples, 65.0);
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, "{\"text\":\"first point\"}");
+        QTRY_COMPARE(lines.size(), 1);
+        QCOMPARE(lines.first().at(0).toString(), QString("You"));
+        QCOMPARE(lines.first().at(1).toString(), QString("first point"));
+        QCOMPARE(lines.first().at(2).toDouble(), 65.0);
+        QVERIFY(control.transcript().contains("[01:05] You: first point"));
+        control.stop();
+    }
+
+    void meetingSpeakerSurvivesConsecutiveUtterances() {
+        // Regression: the diarisation timeline read utterance times as
+        // milliseconds while they are seconds, so every turn fell outside the
+        // phrase and each remote line came back as "Others". One speaker must
+        // keep one number across phrases, too.
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TtsPlayer tts(&client);
+        SessionController control(&client, &tts);
+        Settings settings;
+        settings.meetingDiarize = true;
+        control.configure(settings, SessionController::Mode::Meeting);
+        control.running_ = true;
+        QSignalSpy lines(&control, &SessionController::line);
+
+        QVector<float> samples(16000, 0.05f);          // one second
+        for (int i = 0; i < 2; ++i) {
+            const int first = server.requests.size();
+            control.onUtterance(true, samples, 10.0 + i * 2.0);
+            QTRY_COMPARE(server.requests.size(), first + 1);        // diarisation
+            // The window carries the previous phrase as context, so a real run
+            // reports the earlier speech in it as well; both turns come back
+            // with the same engine id (samples relative to the window). A
+            // window anchored on the phrase start instead of its end shifts
+            // this out of range and yields "Others".
+            const int from = int(i * 2.0 * 16000);                  // phrase start on the timeline
+            const QString context = i
+                ? QStringLiteral(R"({"start_sample":0,"end_sample":%1,"speaker_id":"speaker_0","confidence":0.97},)").arg(from)
+                : QString();
+            server.reply(first, QStringLiteral(R"({"speaker_turns":[%1{"start_sample":%2,"end_sample":%3,"speaker_id":"speaker_0","confidence":0.99}]})")
+                                    .arg(context).arg(from).arg(from + 16000).toUtf8());
+            QTRY_COMPARE(server.requests.size(), first + 2);        // recognition
+            server.reply(first + 1, R"({"text":"привет"})");
+            QTRY_COMPARE(server.requests.size(), first + 3);        // correction
+            server.reply(first + 2, R"({"result":"Привет."})");
+            QTRY_COMPARE(lines.size(), i + 1);
+        }
+        QCOMPARE(lines.at(0).at(0).toString(), QString("Speaker 1"));
+        QCOMPARE(lines.at(1).at(0).toString(), QString("Speaker 1"));
+        control.stop();
+    }
+
+    void captionOverlayStartsAndStopsWithoutAMicrophone() {
+        // Subtitles mode captures one application only: no microphone, so the
+        // overlay must come up even on a machine with no input device.
+        CaptionOverlay overlay(app_);
+        overlay.show();
+        QCoreApplication::processEvents();
+        QVERIFY(overlay.grab().save("caption-overlay.png"));
+        QCOMPARE(overlay.isVisible(), true);
+        overlay.end();
+        overlay.hide();
+    }
+
+    void sessionWindowOpensInBothModes() {
+        // Reproduces the crash report: opening either live mode. The
+        // interpreter shows both halves; subtitles reuses the call pane alone.
+        SessionWindow window(app_);
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveRemote")));
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveMine")));
+        window.openMode(SessionWindow::Mode::Interpreter);
+        QCOMPARE(window.isVisible(), true);
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveMine"))->isVisible());
+        window.openMode(SessionWindow::Mode::Subtitles);
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveRemote"))->isVisible());
+        QVERIFY(!window.findChild<QTextEdit *>(QStringLiteral("liveMine"))->isVisible());
+        window.hide();
+    }
+
+    void liveAndMeetingWindowsHaveLevelBadgesNotBars() {
+        // The mic and call levels are two animated badges in the top row (the
+        // microphone fills, the speaker reacts to call audio); the old design
+        // had bar meters that froze whenever loopback capture went quiet.
+        SessionWindow live(app_);
+        QCOMPARE(live.findChildren<LevelBadge *>(QStringLiteral("micLevelBadge")).size(), 1);
+        QCOMPARE(live.findChildren<LevelBadge *>(QStringLiteral("remoteLevelBadge")).size(), 1);
+        QVERIFY(live.findChildren<QProgressBar *>().isEmpty());
+        MeetingWindow meeting(app_);
+        QCOMPARE(meeting.findChildren<LevelBadge *>(QStringLiteral("micLevelBadge")).size(), 1);
+        QCOMPARE(meeting.findChildren<LevelBadge *>(QStringLiteral("remoteLevelBadge")).size(), 1);
+        QVERIFY(meeting.findChildren<QProgressBar *>().isEmpty());
+        // One shared RMS mapping everywhere: the panel icon and the badges agree.
+        QCOMPARE(AudioMeter::normalized(0.0), 0.0);
+        QVERIFY(AudioMeter::normalized(0.2) > 0.5);
+        QCOMPARE(AudioMeter::normalized(1.0), 1.0);
+    }
+
+    void settingsKeepARecogniserTheServiceHasNotReportedYet() {
+        // The combo is rebuilt from /v1/models. A saved id that the service
+        // has not listed (no service running, or an older build) used to be
+        // dropped to "Service default" on the next save.
+        app_->settings()->asrModel = "nemotron";
+        SettingsDialog dialog(app_);
+        QTest::qWait(250);                       // give a late /v1/models reply its chance
+        auto *save = button(dialog, "Save");
+        QVERIFY(save);
+        QTimer modalGuard;
+        connect(&modalGuard, &QTimer::timeout, this, []() {
+            if (auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
+                message->reject();
+        });
+        modalGuard.start(100);
+        save->click();
+        modalGuard.stop();
+        QCOMPARE(app_->settings()->asrModel, QString("nemotron"));
     }
 
     void recognitionFinishesInOrderBeforeSessionEnds() {
@@ -1470,6 +1735,97 @@ private slots:
         QCOMPARE(processor.pendingOriginal(), QString("First sentence. Second sentence."));
     }
 
+    void generationLimitKeepsTheOriginalOutOfProcessedText() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TextProcessor processor(&client);
+        processor.setMode("auto_correct");
+        processor.setAutoTranslate(true);
+        QSignalSpy batches(&processor, &TextProcessor::processedBatch);
+        QSignalSpy failures(&processor, &TextProcessor::processingFailed);
+        QSignalSpy tail(&processor, &TextProcessor::fragmentRemaining);
+        QSignalSpy finished(&processor, &TextProcessor::finished);
+        const QString original = QString::fromUtf8("Прокачка персонажа должна зависеть от лута.");
+        processor.acceptFinal(original);
+        QTRY_COMPARE(server.requests.size(), 1);
+        const auto request = QJsonDocument::fromJson(server.requests[0]->property("body").toByteArray()).object();
+        QCOMPARE(request.value("mode").toString(), QString("translate_ru_en"));
+        server.reply(0, QString(R"json({"detail":"text processing stopped at the generation limit (300 tokens)",)json"
+                                R"json("reason":"generation_limit","max_tokens":300,"original":"%1"})json").arg(original).toUtf8(), false);
+        QTRY_COMPARE(failures.size(), 1);
+        QCOMPARE(failures[0][0].toString(), original);
+        QVERIFY(failures[0][1].toString().contains("output limit"));
+        QCOMPARE(batches.size(), 0);                         // never reported as translated
+        QCOMPARE(processor.pendingOriginal(), original);     // kept for retry, review and copy
+        processor.acceptFinal("Next sentence.");             // later speech queues behind it
+        QTest::qWait(30);
+        QCOMPARE(server.requests.size(), 1);
+        processor.finish();
+        QCOMPARE(finished.size(), 1);
+        QCOMPARE(tail.size(), 0);                            // not handed over as a final tail either
+        QCOMPARE(batches.size(), 0);
+        QCOMPARE(processor.pendingOriginal(), original + " Next sentence.");
+    }
+
+    void processingModeFollowsTheSentenceLanguage() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TextProcessor processor(&client);
+        processor.setMode("auto_correct");
+        QSignalSpy batches(&processor, &TextProcessor::processedBatch);
+        const auto body = [&server](int index) {
+            return QJsonDocument::fromJson(server.requests[index]->property("body").toByteArray()).object();
+        };
+        const QString russian = QString::fromUtf8("нам нужно исправить эта ошибка.");
+        processor.acceptFinal(russian);
+        QTRY_COMPARE(server.requests.size(), 1);
+        QCOMPARE(body(0).value("mode").toString(), QString("correct_ru"));
+        server.reply(0, QString::fromUtf8(R"({"result":"Нам нужно исправить эту ошибку."})").toUtf8());
+        QTRY_COMPARE(batches.size(), 1);
+        QCOMPARE(batches[0][0].toString(), russian);
+        QCOMPARE(batches[0][1].toString(), QString::fromUtf8("Нам нужно исправить эту ошибку."));
+        processor.acceptFinal("this are a test.");
+        QTRY_COMPARE(server.requests.size(), 2);
+        QCOMPARE(body(1).value("mode").toString(), QString("correct_en"));
+        server.reply(1, R"({"result":"This is a test."})");
+        QTRY_COMPARE(batches.size(), 2);
+        processor.setAutoTranslate(true);
+        processor.acceptFinal("Open the file main.cpp.");
+        QTRY_COMPARE(server.requests.size(), 3);
+        QCOMPARE(body(2).value("mode").toString(), QString("translate_en_ru"));
+        server.reply(2, QString::fromUtf8(R"({"result":"Открой файл main.cpp."})").toUtf8());
+        QTRY_COMPARE(batches.size(), 3);
+        QCOMPARE(batches[2][1].toString(), QString::fromUtf8("Открой файл main.cpp."));
+        processor.acceptFinal(russian);
+        QTRY_COMPARE(server.requests.size(), 4);
+        QCOMPARE(body(3).value("mode").toString(), QString("translate_ru_en"));
+        server.reply(3, R"({"result":"We need to fix this error."})");
+        QTRY_COMPARE(batches.size(), 4);
+    }
+
+    void failedTranslationIsVisibleAndNotProcessed() {
+        TestServer server;
+        app_->service()->setBaseUrl(server.url());
+        app_->settings()->autoTranslate = true;
+        MainWindow window(app_);
+        window.recording_ = window.sessionActive_ = true;
+        window.reviewMode_ = false;
+        const QString original = QString::fromUtf8("Прокачка персонажа должна зависеть от лута.");
+        window.onFinalTranscript(original, 1, 0);
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, R"({"detail":"limit","reason":"generation_limit"})", false);
+        QTRY_VERIFY(window.processingLabel_->text().contains("Translation stopped"));
+        QVERIFY(window.expanded_);
+        QCOMPARE(window.originalSoFar_, original);
+        QVERIFY(window.processedSoFar_.isEmpty());           // automatic insertion sends only processed text
+        QVERIFY(window.resultEdit_->toPlainText().contains(original));   // still visible for review and copy
+        QVERIFY(window.insertedText_.isEmpty());
+        window.recording_ = window.sessionActive_ = false;
+        app_->processor()->reset();
+    }
+
     void incompleteSentenceStaysVerbatim() {
         ServiceClient client;
         TextProcessor processor(&client);
@@ -1544,6 +1900,11 @@ private slots:
     }
 
     void insertionPreservesExistingTextAndDoesNotSubmit() {
+        // Stealing the real desktop focus races with whatever the user is
+        // doing; run this check explicitly (VOICEPANEL_TARGET_TEST) like the
+        // other target-field tests.
+        if (!qEnvironmentVariableIsSet("VOICEPANEL_TARGET_TEST"))
+            QSKIP("Opt-in: set VOICEPANEL_TARGET_TEST to verify insertion on the live desktop");
         if (QGuiApplication::platformName() != "windows") QSKIP("Requires the Windows desktop");
         QLineEdit target("before after");
         target.setWindowTitle("VoicePanel insertion regression");

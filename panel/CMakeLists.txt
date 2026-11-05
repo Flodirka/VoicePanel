@@ -28,15 +28,24 @@ set(PANEL_SOURCES
   src/app/UiKit.cpp
   src/app/VoicePlaybackDialog.cpp
   src/app/ServiceTray.cpp
+  src/app/SessionWindow.cpp
+  src/app/CaptionOverlay.cpp
+  src/app/SettingsPopover.cpp
+  src/app/MeetingWindow.cpp
   src/core/ServiceClient.cpp
   src/core/Settings.cpp
   src/core/DictationController.cpp
   src/core/TextProcessor.cpp
+  src/core/TimingLog.cpp
   src/core/TextDiff.cpp
   src/core/SpellingChecker.cpp
+  src/core/AudioMeter.cpp
+  src/core/LevelBadge.cpp
   src/core/TtsPlayer.cpp
   src/core/MarkdownStore.cpp
   src/core/VoiceProfiles.cpp
+  src/core/LiveSession.cpp
+  src/core/SessionController.cpp
   src/audio/WasapiCapture.cpp
   src/audio/Vad.cpp
   ${UIA_SOURCES}
@@ -51,7 +60,7 @@ target_include_directories(VoicePanelCore PUBLIC
 target_link_libraries(VoicePanelCore PUBLIC
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::Svg
   ${ONNXRUNTIME_DIR}/lib/onnxruntime.lib
-  ole32 oleaut32 uuid user32 version winmm dwmapi
+  ole32 oleaut32 uuid user32 version winmm dwmapi mmdevapi
 )
 
 if(MSVC)
