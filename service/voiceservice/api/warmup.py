@@ -60,11 +60,11 @@ async def warmup(req: WarmupRequest, registry: Registry = Depends(get_registry))
     if req.asr and _schedule(registry, "asr", _warm_asr(registry)):
         scheduled.append("asr")
     mode = _LLM_MODES.get(req.mode or "")
+    llm = registry.llm_for(mode) if mode is not None else None
     if (
         req.llm
-        and mode is not None
-        and registry.llm is not None
-        and not registry.llm.external
+        and llm is not None
+        and not llm.external
         and _schedule(registry, "llm", _warm_llm(registry, req, mode))
     ):
         scheduled.append("llm")
@@ -115,7 +115,7 @@ async def _warm_asr(registry: Registry) -> None:
 
 
 async def _warm_llm(registry: Registry, req: WarmupRequest, mode: str) -> None:
-    llm = registry.llm
+    llm = registry.llm_for(mode)
     if llm is None:
         return
     profile = req.profile if req.profile in PROFILES else "general"

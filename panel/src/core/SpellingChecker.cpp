@@ -52,6 +52,26 @@ QStringList suggestionsFor(ISpellChecker *checker, const QString &word, int limi
 
 } // namespace
 
+QList<SpellingHint> SpellingChecker::filterKnown(QList<SpellingHint> hints, const QStringList &knownWords) const {
+    if (knownWords.isEmpty()) return hints;
+    // Lower-cased so case and ё/е differences do not matter.
+    QStringList known;
+    known.reserve(knownWords.size());
+    for (const QString &word : knownWords) {
+        const QString cleaned = word.trimmed().toLower().replace(QString(QChar('ё')), QString(QChar('е')));
+        if (!cleaned.isEmpty()) known << cleaned;
+    }
+    if (known.isEmpty()) return hints;
+    QList<SpellingHint> out;
+    out.reserve(hints.size());
+    for (const SpellingHint &hint : hints) {
+        const QString cleaned = hint.word.trimmed().toLower().replace(QString(QChar('ё')), QString(QChar('е')));
+        if (known.contains(cleaned)) continue;
+        out.append(hint);
+    }
+    return out;
+}
+
 SpellingChecker::SpellingChecker() {
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     comInitialized_ = SUCCEEDED(initialized) && initialized != S_FALSE;
@@ -108,11 +128,21 @@ QList<SpellingHint> SpellingChecker::check(const QString &text, const QString &l
         ULONG start = 0, length = 0;
         error->get_StartIndex(&start);
         error->get_Length(&length);
+        // The checker's own corrective action: REPLACE carries a concrete
+        // replacement (grammar-style fixes), GET_SUGGESTIONS only lists options.
+        CORRECTIVE_ACTION action = CORRECTIVE_ACTION_NONE;
+        error->get_CorrectiveAction(&action);
+        LPWSTR replacement = nullptr;
+        error->get_Replacement(&replacement);
+        QString proposed;
+        if (action == CORRECTIVE_ACTION_REPLACE && replacement)
+            proposed = QString::fromWCharArray(replacement);
+        if (replacement) CoTaskMemFree(replacement);
         error->Release();
         if (length == 0 || start + length > wide.size()) continue;
         const QString word = QString::fromWCharArray(wide.c_str() + start, int(length));
         if (!worthReporting(word)) continue;
-        hints.append({word, suggestionsFor(checker, word, 3)});
+        hints.append({word, suggestionsFor(checker, word, 3), proposed});
     }
     errors->Release();
     return hints;

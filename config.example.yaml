@@ -19,14 +19,33 @@ service:
   max_upload_mb: 200
 
 asr:
-  default: qwen3-asr     # qwen3-asr (~5x realtime on CPU) | whisper (timestamps)
+  default: nemotron      # nemotron (fastest measured, 0.41-0.46 RTF CPU) | whisper (timestamps)
 
 tts:
-  default: auto          # auto -> Kokoro for English; Russian uses the clone model + a voice profile
-  clone_model: qwen3-tts-clone   # model recorded for new voice profiles
+  # auto routes by the text's script: Kokoro for English, piper-ru (male) or
+  # piper-ru-female for Russian (both small, CPU, main process). The cloning
+  # engine (OmniVoice Q8 via omnivoice.cpp) is used only when a cloned voice
+  # profile is selected explicitly (voice=<profile-id>).
+  default: auto
+  # OmniVoice 0.6B Q8_0: ~945 MB, 600+ languages, much lighter than
+  # qwen3-tts-clone (1.9 GB, ru/en only). Served by the omnivoice.cpp engine
+  # (backends/omnivoice section below). Set to qwen3-tts-clone to use the
+  # audio.cpp alternative instead (then also enable audiocpp_clone).
+  clone_model: omnivoice-q8
+  # Profile IDs from GET /v1/voices - or a built-in model id (e.g.
+  # piper-ru-female) to choose the female Russian default voice.
+  # Used only when a speech request omits both voice and a specific model;
+  # explicit request values always win.
+  default_voices:
+    en: ""                # empty -> built-in English voice
+    ru: ""                # e.g. piper-ru-female, or a cloned profile id
 
 llm:
   enabled: true
+  # skip_if_clean: true (default) returns correction-mode sentences unchanged
+  # when the deterministic pre-pass found no dictionary near-miss and the spell
+  # checker flagged nothing - the model is not called for them at all.
+  # skip_if_clean: false
 
 sessions:                # WebSocket dictation (/v1/sessions/dictation)
   vad_model: runtime/models/silero_vad.onnx
@@ -60,9 +79,10 @@ backends:
     espeak_data: runtime/third_party/espeak-ng/eSpeak NG/espeak-ng-data
     voice_dir: runtime/voice-library   # zero-shot cloning profiles (see /v1/voices)
     models:
-      - id: qwen3-asr
-        family: qwen3_asr
-        path: runtime/models/qwen3-asr-0.6b-q8_0.gguf
+      # nemotron: 0.41-0.46 RTF on CPU (the fastest measured), punctuates in EN only.
+      - id: nemotron
+        family: nemotron_asr
+        path: runtime/models/nemotron-3.5-asr-streaming-0.6b-q8_0.gguf
         task: asr
         mode: offline
         language: auto
@@ -72,13 +92,61 @@ backends:
         task: tts
         mode: offline
         voice: af_heart
+        language: en          # routing hint only (auto picks this for Latin text)
+      - id: piper-ru          # Russian built-in voice (male), 62 MB, CPU
+        family: piper_tts
+        path: runtime/models/piper-ru-ruslan-medium.gguf
+        task: tts
+        mode: offline
+        language: ru          # routing hint only (auto picks this for Cyrillic text)
+        supports_language: false
+      - id: piper-ru-female   # Russian built-in voice (female), 62 MB, CPU
+        family: piper_tts
+        path: runtime/models/piper-ru-irina-medium.gguf
+        task: tts
+        mode: offline
+        language: ru
+        supports_language: false
 
-  # ------------------------------------------------------- clone helper (GPU)
-  # Started only for cloning (profile preview and cloned-voice synthesis),
-  # stopped after idle_stop_s to release VRAM. Disable to run cloning on the
-  # main CPU process (then add qwen3-tts-clone to audiocpp.models).
-  audiocpp_clone:
+  # -------------------------------------------------- cloning engine (omnivoice)
+  # k2-fsa omnivoice.cpp driving OmniVoice 0.6B Q8_0 (~945 MB total, 600+
+  # languages, zero-shot cloning; weights CC-BY-NC 4.0 - download yourself, see
+  # README "Models"). A stdin/stdout CLI supervised by the service
+  # (service/voiceservice/backends/omnivoice.py): one warm child, one utterance
+  # per input line, stopped after idle_stop_s. The `clone` compute group swaps
+  # this binary between omnivoice-cpu and omnivoice-cuda builds (the CUDA build
+  # makes cloned-voice TTS fast enough for real-time calls; the CPU build is
+  # slow, RTF ~10-24 measured under load).
+  # Model download (weights only; the engine builds from source, see README):
+  #   HF Serveurperso/OmniVoice-GGUF -> omnivoice-base-Q8_0.gguf +
+  #   omnivoice-tokenizer-Q8_0.gguf into runtime/models/omnivoice/
+  omnivoice:
     enabled: true
+    binary: runtime/bin/omnivoice-cpu/omnivoice-tts.exe
+    codec_binary: runtime/bin/omnivoice-cpu/omnivoice-codec.exe
+    backend: cpu          # bookkeeping for the compute switch (cpu | cuda)
+    threads: 8
+    steps: 32             # MaskGIT decode steps; fewer is faster, lower quality
+    voice_dir: runtime/voice-library
+    idle_stop_s: 300      # stop the child (frees ~1 GB RAM) when idle
+    start_timeout_s: 120
+    request_timeout_s: 600
+    max_line_chars: 300
+    models:
+      - id: omnivoice-q8
+        family: omnivoice
+        path: runtime/models/omnivoice/omnivoice-base-Q8_0.gguf
+        codec_path: runtime/models/omnivoice/omnivoice-tokenizer-Q8_0.gguf
+        task: tts
+        mode: offline
+        language: auto
+
+  # ------------------------------------------- alternative clone helper (audio.cpp)
+  # The qwen3-tts-clone alternative (1.9 GB, ru/en + 8 languages, ~6.4 GB VRAM
+  # peak on GPU). To switch: enable this, disable `omnivoice`, and set
+  # tts.clone_model to qwen3-tts-clone.
+  audiocpp_clone:
+    enabled: false
     binary: runtime/bin/audiocpp-cuda/audiocpp_server.exe
     backend: cuda        # cpu | cuda | vulkan
     device: 0
@@ -111,12 +179,12 @@ backends:
     idle_stop_s: 1800
 
   llama:
-    # Text correction/translation on the CPU. Qwen3-4B Q4_K_M is the default:
-    # ~2.5 GB resident, about 1.3 s per sentence.
-    #
-    # Qwen3.5-0.8B Q4_K_M (runtime/models/qwen3.5-0.8b-q4_k_m.gguf, ~530 MB,
-    # ~800 MB resident, ~0.5 s) is measured and works, but it rewrites sentences
-    # instead of correcting them; keep it for experiments, not for dictation.
+    # Text CORRECTION on the CPU. Default: the small GEC model (563 MB). The
+    # service always sends enable_thinking=false, which this model needs
+    # (thinking mode produced empty/wrong output - measured). Deterministic
+    # pre-pass (dictionary near-misses + spell-checker REPLACE proposals) and
+    # the llm.skip_if_clean gate run before the model, so clean sentences skip
+    # it entirely.
     #
     # The service can either start this model itself (binary + model_path below)
     # or use a llama.cpp server you already run - an agent's model on the GPU,
@@ -129,8 +197,8 @@ backends:
     variant_dirs: [runtime/bin/llama-cuda, runtime/bin/llama-vulkan]
     host: 127.0.0.1
     port: 8103
-    model_path: runtime/models/qwen3-4b-instruct-2507-q4_k_m.gguf
-    model_alias: qwen3-4b
+    model_path: runtime/models/Qwen3.5-0.8B-GEC-KAZ-RUS-ENG.Q4_0.gguf
+    model_alias: gec-0.8b
     ctx_size: 8192
     gpu_layers: 0            # 0 = CPU only
     flash_attn: true
@@ -144,4 +212,28 @@ backends:
     # with tools/bench before switching. V quantization needs flash_attn.
     # cache_type_k: q8_0
     # cache_type_v: q8_0
-    idle_stop_s: 900         # stop the process after fifteen idle minutes
+    idle_stop_s: 300         # free RAM soon after a session ends
+
+  # Dedicated TRANSLATION model: translation modes (translate_ru_en /
+  # translate_en_ru) route here; correction stays on `llama`.
+  # Base: PLaMo 3 Translate 0.8B Q4_K_M (573 MB) - verified in the full app flow
+  # (docs/alternative-runtimes.md); template_style: plamo makes the service pass
+  # context/glossary/target_lang as chat-template kwargs instead of a system turn.
+  # Alternative: Hy-MT2-1.8B Q4_K_M (1.1 GB) - swap model_path/model_alias and
+  # remove template_style. License note: PLaMo Community License (personal /
+  # non-commercial free), Hy-MT2 Apache-2.0 code + check weight card.
+  llama_translate:
+    enabled: true
+    binary: runtime/bin/llama-vulkan/llama-server.exe
+    variant_dirs: [runtime/bin/llama-cuda, runtime/bin/llama-vulkan]
+    host: 127.0.0.1
+    port: 8106
+    model_path: runtime/models/plamo-3-translate/plamo-3-translate-0.8b-Q4_K_M.gguf
+    model_alias: plamo-3-translate-0.8b
+    template_style: plamo
+    ctx_size: 8192
+    gpu_layers: 0
+    flash_attn: true
+    threads: 8
+    cache_ram_mib: 512
+    idle_stop_s: 300

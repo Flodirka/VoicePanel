@@ -5,3 +5,12 @@ Common technical topics include AI prompts and instructions, software developmen
 Godot, Unity, and Unreal Engine may appear in the same conversation. These topics share one context; do not reinterpret a technical term just because the topic changes.
 
 Preserve engine names, game design terms, technical identifiers, class and function names, file paths, commands, code, and version numbers. Keep English technical terms intact inside Russian speech. Preserve meaning and the speaker's tone.
+
+## Terminology
+
+Add one term per line as a bullet. These words are sent to the service as a
+dictionary: near-miss renderings of them in the transcript (for example
+"drobpox" for "dropbox") are corrected deterministically before the language
+model runs, and the spell checker does not flag them.
+
+- dropbox

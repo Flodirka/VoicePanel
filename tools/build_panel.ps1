@@ -1,4 +1,4 @@
-# Builds the Qt 6 panel with MSVC + Ninja, then deploys Qt DLLs next to the exe.
+﻿# Builds the Qt 6 panel with MSVC + Ninja, then deploys Qt DLLs next to the exe.
 param(
     [string]$QtDir = "runtime\Qt\6.8.3\msvc2022_64",
     [string]$BuildDir = "panel\build",
@@ -50,9 +50,27 @@ if (Test-Path $vad) {
 if (-not $SkipDeploy) {
     $wdq = Join-Path $qt "bin\windeployqt.exe"
     if (Test-Path $wdq) {
+        # windeployqt prints warnings (a missing dxcompiler.dll is normal for a
+        # widgets build) on stderr. With $ErrorActionPreference = Stop that
+        # becomes a NativeCommandError that aborts the script *after* a
+        # successful compile, so the exit code is ignored here on purpose.
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         & $wdq --release --no-translations --no-opengl-sw --no-system-d3d-compiler `
-            (Join-Path $binDir "VoicePanel.exe") | Out-Null
+            (Join-Path $binDir "VoicePanel.exe") 2>&1 | Out-Null
+        $ErrorActionPreference = $previous
+    }
+    # The test binary links Qt6Test, which windeployqt does not copy because
+    # VoicePanel.exe does not link it. Without this the tests die with
+    # STATUS_DLL_NOT_FOUND (0xC0000135) and print nothing.
+    $qtTest = Join-Path $qt "bin\Qt6Test.dll"
+    if (Test-Path $qtTest) {
+        Copy-Item $qtTest (Join-Path $binDir "Qt6Test.dll") -Force
     }
 }
+
+$ctest = Join-Path $qt "bin\ctest.exe"
+if (-not (Test-Path $ctest)) { $ctest = "ctest" }
+Write-Host "run the panel tests with: $ctest --test-dir $build --output-on-failure"
 
 Write-Host "panel built: $(Join-Path $binDir 'VoicePanel.exe')"

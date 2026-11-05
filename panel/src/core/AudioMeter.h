@@ -11,6 +11,11 @@ public:
     explicit AudioMeter(QWidget *parent = nullptr);
     QSize sizeHint() const override { return {64, 18}; }
 
+    // The one shared RMS -> 0..1 mapping (speech RMS hovers around 0.02-0.3,
+    // so it is logarithmic). Every meter in the app uses this, so the bars in
+    // the panel, the live window and the meeting window move alike.
+    static double normalized(double rms);
+
 public slots:
     void setLevel(double rms);
 

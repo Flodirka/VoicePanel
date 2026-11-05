@@ -55,14 +55,24 @@ MODE_PROMPTS: dict[str, str] = {
         "pipeline) in Latin script. Keep the output format of the source."
     ),
     "correct_en": (
-        "Correct grammar, word choice, punctuation, and natural expression of the "
-        "English text. Keep the author's meaning, tone, and formatting. Do not add "
-        "information. If the text is already correct, return it unchanged."
+        "Fix only what is objectively wrong in the English text: grammar, agreement, "
+        "missing or wrong punctuation, capitalisation, and words the speaker clearly "
+        "did not say. Do not add information and do not remove content. Make the "
+        "smallest edit that fixes the fault: do not rephrase, do not improve style, "
+        "do not replace a word that is already correct with a synonym, do not merge or "
+        "split sentences, do not drop the speaker's fillers or repetitions. If the text "
+        "is already correct, return it unchanged; a grammatical sentence must come back "
+        "byte-for-byte identical. When in doubt, change nothing."
     ),
     "correct_ru": (
-        "Correct grammar, word choice, punctuation, and natural expression of the "
-        "Russian text. Keep the author's meaning, tone, and formatting. Do not add "
-        "information. If the text is already correct, return it unchanged."
+        "Fix only what is objectively wrong in the Russian text: grammar, agreement, "
+        "missing or wrong punctuation, capitalisation, and words the speaker clearly "
+        "did not say. Do not add information and do not remove content. Make the "
+        "smallest edit that fixes the fault: do not rephrase, do not improve style, "
+        "do not replace a word that is already correct with a synonym, do not merge or "
+        "split sentences, do not drop the speaker's fillers or repetitions. If the text "
+        "is already correct, return it unchanged; a grammatical sentence must come back "
+        "byte-for-byte identical. When in doubt, change nothing."
     ),
 }
 
@@ -94,7 +104,15 @@ def _spelling_section(spelling: list[dict[str, Any]]) -> str | None:
         if not word:
             continue
         suggestions = [str(s) for s in (hint.get("suggestions") or []) if str(s).strip()][:3]
-        lines.append(f'- "{word}" -> {", ".join(suggestions)}' if suggestions else f'- "{word}"')
+        proposed = str(hint.get("proposed", "")).strip()
+        if proposed and proposed not in suggestions:
+            suggestions.insert(0, proposed)
+        if proposed:
+            lines.append(f'- "{word}" -> {proposed} (the spell checker itself proposes this replacement)')
+        elif suggestions:
+            lines.append(f'- "{word}" -> {", ".join(suggestions)}')
+        else:
+            lines.append(f'- "{word}"')
     if not lines:
         return None
     return (
@@ -154,6 +172,11 @@ def build_messages(
 # Whisper/Qwen transcripts sometimes contain bracketed non-speech annotations
 # ("[BLANK_AUDIO]", "(silence)", "[Music]"); a transcript made only of them is
 # empty. Mirrors Pithagoras' cleanTranscript.
+# Some models emit a language tag inside the text ("<mt-MT>" when Nemotron
+# guesses Maltese for Russian speech, "<|en|>" from template-style models).
+# It is metadata, never a word the speaker said.
+_LANG_TAG = re.compile(r"<\|?[a-z]{2,3}[-_][A-Z]{2}\|?>|<\|[a-z_]+\|>")
+
 _BRACKET_ONLY = re.compile(r"^(?:\s*[[（(\[][^\])]*[\])）]])+\s*$")
 
 
@@ -188,7 +211,8 @@ def strip_foreign_scripts(text: str) -> str:
 
 
 def clean_transcript(text: str) -> str:
-    stripped = text.strip()
+    # Removing a tag leaves a double space where it sat.
+    stripped = re.sub(r"[ \t]{2,}", " ", _LANG_TAG.sub("", text)).strip()
     if _BRACKET_ONLY.match(stripped):
         return ""
     return strip_foreign_scripts(stripped)
@@ -226,3 +250,136 @@ def complete_sentence_prefix(text: str) -> tuple[str, str]:
     complete = stripped[: last.end()].strip()
     fragment = stripped[last.end():].strip()
     return complete, fragment
+
+
+# --------------------------------------------------------------------------
+# Deterministic pre-pass: dictionary near-misses and spell-checker hits that
+# match the user's terminology are fixed without the model. Inspired by
+# WinVosk's corrector.py. Runs on the finished text only, in ~1 ms per
+# sentence, and reports every replacement so the caller can show or log it.
+#
+# Measured cutoffs (WinVosk, 138 real words from logs): a dropped letter
+# scores about 0.93, a wrong consonant about 0.80, so 0.75 catches both with
+# a ~0.03 % false-replacement rate against random tokens.
+DICT_NEAR_MISS_CUTOFF = 0.75
+DICT_MIN_LENGTH = 4        # shorter words are where wrong fixes are invisible
+JOIN_MIN = 3               # min length of each half of a glued pair
+
+
+def _norm_word(word: str) -> str:
+    """Case- and ё/е-insensitive comparison key."""
+    return word.strip().lower().replace("ё", "е")
+
+
+def _ratio(a: str, b: str) -> float:
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _closest(word: str, words: list[str], cutoff: float = DICT_NEAR_MISS_CUTOFF) -> str | None:
+    """The listed word `word` should become, or None to leave it alone.
+
+    An exact hit and an inflection («дропбоксы» for «дропбокс») are left
+    alone: Russian inflects heavily, so folding a form back to its stem would
+    be wrong more often than right. Add the forms you actually say.
+    """
+    best, best_ratio = None, 0.0
+    for candidate in words:
+        r = _ratio(word, candidate)
+        if r > best_ratio:
+            best, best_ratio = candidate, r
+    if best is None or best_ratio < cutoff:
+        return None
+    if best == word or word.startswith(best):
+        return None
+    return best
+
+
+def _match_case(original: str, replacement: str) -> str:
+    """Keep the shape of the heard token: capitalised stays capitalised."""
+    if original[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
+
+
+def deterministic_pass(
+    text: str,
+    dictionary: list[str] | None = None,
+    spelling: list[dict[str, Any]] | None = None,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Fix transcript tokens that are near-misses of known user terms.
+
+    Returns (possibly fixed text, [(heard, replaced), ...]). Two sources:
+
+    * the user dictionary: a token (or two glued tokens, for splits like
+      «друг бокс» -> «дропбокс») within the cutoff of a listed word;
+    * spell-checker hints: a flagged word with the checker's own REPLACE
+      proposal (grammar-style fixes) is replaced by that proposal outright,
+      and a flagged word that is a near-miss of a listed word is replaced by
+      the listed word — the checker and the dictionary agree, so no model
+      needs to decide.
+
+    Hints that match no dictionary word are left for the LLM, exactly as
+    before. Tokens that already are dictionary words are never touched.
+    """
+    if not text or not text.strip():
+        return text, []
+    terms = [
+        _norm_word(w)
+        for w in (dictionary or [])
+        if " " not in w.strip() and len(_norm_word(w)) >= DICT_MIN_LENGTH
+    ]
+    terms = list(dict.fromkeys(terms))
+    spell_fix: dict[str, str] = {}
+    if spelling:
+        for hint in spelling:
+            word = _norm_word(str(hint.get("word", "")))
+            if len(word) < 2:
+                continue
+            # The checker's own REPLACE correction (grammar-style fixes such as
+            # agreement, also short words like "are" -> "is") is applied
+            # verbatim: it is a high-confidence signal, not a guess. A near-miss
+            # of a dictionary word is fixed to the listed word when they agree.
+            proposed = str(hint.get("proposed", "")).strip()
+            if proposed and len(_norm_word(proposed)) >= 2:
+                spell_fix[word] = _norm_word(proposed)
+                continue
+            if len(word) >= DICT_MIN_LENGTH and terms:
+                hit = _closest(word, terms)
+                if hit and hit != word:
+                    spell_fix[word] = hit
+    if not terms and not spell_fix:
+        return text, []
+
+    tokens = text.split()
+    out: list[str] = []
+    changes: list[tuple[str, str]] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        following = tokens[i + 1] if i + 1 < len(tokens) else ""
+        key = _norm_word(token)
+        replacement: str | None = None
+        consumed = 0
+        if key in spell_fix:
+            replacement = spell_fix[key]
+            changes.append((token, replacement))
+        elif len(key) >= DICT_MIN_LENGTH and key not in terms:
+            nxt = _norm_word(following)
+            if len(key) >= JOIN_MIN and len(nxt) >= JOIN_MIN:
+                glued = _closest(key + nxt, terms)
+                if glued:
+                    replacement = glued
+                    consumed = 1
+                    changes.append((f"{token} {following}", glued))
+            if replacement is None:
+                single = _closest(key, terms)
+                if single:
+                    replacement = single
+                    changes.append((token, single))
+        out.append(_match_case(token, replacement) if replacement else token)
+        i += 1 + consumed
+    if not changes:
+        return text, changes
+    return " ".join(out), changes

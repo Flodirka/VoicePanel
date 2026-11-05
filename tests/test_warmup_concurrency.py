@@ -30,7 +30,7 @@ SPEECH = samples_to_wav(np.full(16000, 0.2, dtype=np.float32))
 def _config(tmp_path: Path, extra: str = "") -> Path:
     (tmp_path / "runtime").mkdir(exist_ok=True)
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("backends:\n  audiocpp_clone:\n    enabled: false\n" + extra, encoding="utf-8")
+    cfg.write_text("llm:\n  skip_if_clean: false\nbackends:\n  audiocpp_clone:\n    enabled: false\n  llama_translate:\n    enabled: false\n" + extra, encoding="utf-8")
     return cfg
 
 
@@ -113,7 +113,7 @@ def test_warmup_skips_the_load_when_a_real_request_loaded_the_model_first(live, 
         return {"text": "real"}
 
     async def loaded_models():
-        return [{"id": "qwen3-asr", "loaded": state["loaded"]}]
+        return [{"id": "nemotron", "loaded": state["loaded"]}]
 
     monkeypatch.setattr(type(registry.audiocpp.proc), "running", property(lambda self: True))
     registry.audiocpp.transcribe = transcribe

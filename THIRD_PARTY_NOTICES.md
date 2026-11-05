@@ -17,6 +17,7 @@ Pithagoras is licensed under Apache-2.0. Its [license](licenses/Apache-2.0.txt) 
 
 - **Inter.** Copyright 2020 The Inter Project Authors. The variable font in `panel/resources/fonts/` is distributed under the [SIL Open Font License 1.1](panel/resources/fonts/OFL.txt).
 - **Material Line Icons.** Vjacheslav Trushkin. Static paths in the panel icon set include Material Line Icons, with animation removed and local sizing/color handling. See the [upstream project](https://github.com/cyberalien/line-md) and [MIT notice](licenses/Material-Line-Icons-MIT.txt).
+- **Lucide icons.** Icon geometry from [Lucide](https://lucide.dev), ISC License.
 - **Feather icons.** Cole Bemis. The panel's simple stroke icon set includes Feather-style icon geometry. See the [upstream project](https://github.com/feathericons/feather) and [MIT notice](licenses/Feather-MIT.txt).
 - **README graphics.** The VoicePanel and profile banners and support-button graphics were created for these repositories. Screenshots show VoicePanel widgets with sample text.
 
@@ -27,6 +28,7 @@ These components are not included as binary artifacts in this source repository:
 | Component | Upstream and license reference |
 |---|---|
 | audio.cpp | [0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp), Apache-2.0 |
+| omnivoice.cpp | [k2-fsa/OmniVoice](https://github.com/k2-fsa/OmniVoice) engine (built from source, not redistributed), Apache-2.0; its OmniVoice model weights are CC-BY-NC 4.0 and must be downloaded separately |
 | llama.cpp | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp), MIT |
 | whisper.cpp | [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp), MIT |
 | Silero VAD | [snakers4/silero-vad](https://github.com/snakers4/silero-vad), MIT |

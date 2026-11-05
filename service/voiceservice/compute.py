@@ -1,10 +1,11 @@
 """CPU/GPU placement for the inference process groups the panel exposes.
 
-The service runs inference in three supervised processes:
+The service runs inference in supervised processes:
 
 * ``llm``   - llama.cpp: translation and correction
-* ``clone`` - audio.cpp helper: cloned-voice TTS only
+* ``clone`` - omnivoice.cpp: cloned-voice TTS (the default cloning engine)
 * ``main``  - audio.cpp: speech recognition and the built-in voices, one process
+* ``diar``  - audio.cpp: speaker separation in its own process
 
 Recognition and the built-in voices cannot be split: audio.cpp takes one device
 per server process, so both always share one choice.
@@ -27,12 +28,23 @@ DEVICES = ("cpu", "gpu")
 
 GROUPS: dict[str, dict[str, str]] = {
     "llm": {"label": "Translation and correction", "process": "llama"},
-    "clone": {"label": "Cloned voice TTS", "process": "audiocpp_clone"},
+    "clone": {"label": "Cloned voice TTS", "process": "omnivoice"},
     "main": {"label": "Recognition and built-in voices (one process)", "process": "audiocpp"},
+    "diar": {"label": "Speaker separation", "process": "audiocpp_diar"},
 }
 
+# Group -> backend section. `main` and `diar` run audio.cpp; `clone` runs the
+# omnivoice.cpp engine (the default cloning model; audio.cpp's own clone helper
+# `audiocpp_clone` is the documented qwen3 alternative and is switched by
+# editing its section, not through this group).
+_SECTION = {"clone": "omnivoice", "main": "audiocpp", "diar": "audiocpp_diar"}
+
 # audio.cpp: the CUDA build also runs on the CPU, so the device is `backend`.
-_AUDIOCPP_VARIANTS = {"cpu": ("audiocpp-cpu", "cpu"), "gpu": ("audiocpp-cuda", "cuda")}
+# omnivoice.cpp: the CUDA build needs cuBLAS at runtime; the CPU build is the
+# fallback when the GPU build was not compiled.
+_AUDIOCPP_VARIANTS = {"cpu": "audiocpp-cpu", "gpu": "audiocpp-cuda"}
+_OMNIVOICE_VARIANTS = {"cpu": "omnivoice-cpu", "gpu": "omnivoice-cuda"}
+_AUDIOCPP_BACKEND = {"cpu": "cpu", "gpu": "cuda"}
 _LLAMA_GPU_VARIANT = "llama-cuda"
 _LLAMA_CPU_VARIANT = "llama-vulkan"   # a GPU build with gpu_layers 0 stays on the CPU
 _LLAMA_GPU_LAYERS = 99
@@ -74,8 +86,9 @@ def current_devices(cfg: dict[str, Any]) -> dict[str, str]:
     llama = backends.get("llama") or {}
     return {
         "llm": "gpu" if int(llama.get("gpu_layers", 0) or 0) > 0 else "cpu",
-        "clone": _audiocpp_device(backends.get("audiocpp_clone")),
+        "clone": _audiocpp_device(backends.get("omnivoice")),
         "main": _audiocpp_device(backends.get("audiocpp")),
+        "diar": _audiocpp_device(backends.get("audiocpp_diar")),
     }
 
 
@@ -103,13 +116,13 @@ def apply_to_config(cfg: dict[str, Any], choices: dict[str, str]) -> None:
         if group == "llm":
             _apply_llm(backends.setdefault("llama", {}), device)
         else:
-            key = "audiocpp_clone" if group == "clone" else "audiocpp"
+            key = _SECTION[group]
             section = backends.get(key)
             if not section:
                 raise ValueError(f"the {group} backend is not configured")
-            if key == "audiocpp_clone" and not section.get("enabled", False):
-                raise ValueError("the cloned-voice process is disabled in the configuration")
-            _apply_audiocpp(section, device)
+            if not section.get("enabled", True):
+                raise ValueError(f"the {group} backend is disabled in the configuration")
+            _apply_variant(section, group, device)
 
 
 def apply_overrides(cfg: dict[str, Any]) -> dict[str, str]:
@@ -138,24 +151,29 @@ def _sibling_binary(binary: str, variant: str) -> Path:
     return path.parent.parent / variant / path.name
 
 
+def _variants(group: str) -> dict[str, str]:
+    return _OMNIVOICE_VARIANTS if group == "clone" else _AUDIOCPP_VARIANTS
+
+
 def _gpu_binary(group: str, backends: dict[str, Any]) -> str | None:
     if group == "llm":
         binary = (backends.get("llama") or {}).get("binary")
         return str(_sibling_binary(str(binary), _LLAMA_GPU_VARIANT)) if binary else None
-    key = "audiocpp_clone" if group == "clone" else "audiocpp"
+    key = _SECTION[group]
     binary = (backends.get(key) or {}).get("binary")
     if not binary:
         return None
-    return str(_sibling_binary(str(binary), _AUDIOCPP_VARIANTS["gpu"][0]))
+    return str(_sibling_binary(str(binary), _variants(group)["gpu"]))
 
 
-def _apply_audiocpp(section: dict[str, Any], device: str) -> None:
-    variant, backend = _AUDIOCPP_VARIANTS[device]
+def _apply_variant(section: dict[str, Any], group: str, device: str) -> None:
+    """Point a process-based backend at the chosen device's build."""
+    variant = _variants(group)[device]
     binary = _sibling_binary(str(section.get("binary", "")), variant)
     if not binary.is_file():
         raise ValueError(f"the {device} build is missing ({binary})")
     section["binary"] = str(binary)
-    section["backend"] = backend
+    section["backend"] = _AUDIOCPP_BACKEND[device]
 
 
 def _apply_llm(llama: dict[str, Any], device: str) -> None:

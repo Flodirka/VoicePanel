@@ -21,7 +21,7 @@ def service(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setenv("VOICE_SERVICE_AUTH_TOKEN", "")
     (tmp_path / "runtime").mkdir()
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("backends:\n  audiocpp_clone:\n    enabled: false\n", encoding="utf-8")
+    cfg.write_text("llm:\n  skip_if_clean: false\nbackends:\n  audiocpp_clone:\n    enabled: false\n  llama_translate:\n    enabled: false\n", encoding="utf-8")
     with TestClient(create_app(cfg), base_url="http://127.0.0.1") as client:
         yield client
 

@@ -232,6 +232,7 @@ def _backend_proc(registry: Registry, name: str):
     mapping = {
         "audiocpp": registry.audiocpp.proc,
         "audiocpp_clone": registry.audiocpp_clone.proc if registry.audiocpp_clone else None,
+        "audiocpp_diar": registry.audiocpp_diar.proc if registry.audiocpp_diar else None,
         "clone": registry.audiocpp_clone.proc if registry.audiocpp_clone else None,
         "whisper": registry.whisper.proc if registry.whisper else None,
         "llama": registry.llama.proc if registry.llm else None,

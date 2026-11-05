@@ -73,9 +73,14 @@ void TextProcessor::dispatchPending() {
                              : mode_;
     const QString profile = profile_;
     const quint64 generation = generation_;
+    // Spell-checker hints inform the model; words from the user's terminology
+    // are filtered out first, because flagging them is never useful.
+    const QList<SpellingHint> hints = spell_.available()
+        ? spell_.filterKnown(spell_.check(original, QString()), dictionary_)
+        : QList<SpellingHint>{};
     QPointer<TextProcessor> self(this);
     TimingLog::event("text_request", {{"chars", int(original.size())}, {"mode", mode}});
-    service_->processText(original, mode, profile, previous, {},
+    service_->processText(original, mode, profile, previous, hints,
                           [this, self, generation, original](bool ok, QString result, QString notes, QString err) mutable {
         if (!self || generation != generation_) return;
         inFlight_ = false;

@@ -11,6 +11,7 @@ from .. import compute
 from ..config import load_config
 from .audiocpp import AudioCppBackend
 from .llama import LlamaBackend
+from .omnivoice import OmnivoiceBackend
 from .process import ManagedProcess
 from .whisper import WhisperBackend
 
@@ -46,6 +47,29 @@ class Registry:
                     "cloning falls back to the main backend",
                     binary,
                 )
+        self.audiocpp_diar: AudioCppBackend | None = None
+        diar_cfg = bcfg.get("audiocpp_diar") or {}
+        if diar_cfg.get("enabled", False):
+            binary = Path(str(diar_cfg.get("binary", "")))
+            if binary.is_file():
+                self.audiocpp_diar = AudioCppBackend(diar_cfg, state_dir, log_dir)
+            else:
+                log.warning("audiocpp_diar enabled but binary is missing (%s)", binary)
+        # Cloning engine (k2-fsa omnivoice.cpp): a piped CLI instead of an HTTP
+        # server, supervised by OmnivoiceBackend itself. The default clone
+        # model; audio.cpp's qwen3 helper above is the config-swap alternative.
+        self.omnivoice: OmnivoiceBackend | None = None
+        ov_cfg = bcfg.get("omnivoice") or {}
+        if ov_cfg.get("enabled", False):
+            binary = Path(str(ov_cfg.get("binary", "")))
+            if binary.is_file():
+                self.omnivoice = OmnivoiceBackend(ov_cfg, log_dir)
+            else:
+                log.warning(
+                    "omnivoice enabled but binary is missing (%s); "
+                    "cloning falls back to the audio.cpp helper if configured",
+                    binary,
+                )
         self.whisper: WhisperBackend | None = None
         if bcfg.get("whisper", {}).get("enabled", True):
             self.whisper = WhisperBackend(bcfg["whisper"], log_dir)
@@ -55,6 +79,14 @@ class Registry:
             llama_cfg.get("model_path") or llama_cfg.get("external")
         ):
             self.llama = LlamaBackend(llama_cfg, log_dir)
+        # Optional dedicated translation model (e.g. Hy-MT2-1.8B): translation
+        # modes route to it when configured, correction stays on `llama`.
+        # Its device is fixed by its own config; compute switching does not
+        # cover it (it is not one of compute.GROUPS).
+        self.llm_translate: LlamaBackend | None = None
+        tr_cfg = bcfg.get("llama_translate") or {}
+        if tr_cfg.get("enabled", True) and (tr_cfg.get("model_path") or tr_cfg.get("external")):
+            self.llm_translate = LlamaBackend(tr_cfg, log_dir)
         # Serialise inference calls per engine: audiocpp serves one model at a
         # time, whisper is single-slot, llama handles its own parallelism.
         self._asr_lock = asyncio.Lock()
@@ -69,6 +101,17 @@ class Registry:
         """Alias so API code can speak of 'the llm backend'."""
         return self.llama
 
+    def llm_for(self, mode: str) -> LlamaBackend | None:
+        """The backend a text mode runs on.
+
+        Translation modes use the dedicated `llama_translate` backend when one
+        is configured (a small specialist such as Hy-MT2-1.8B, ~3x faster than
+        a general 4B on decode); everything else uses the main `llama`.
+        """
+        if mode in ("translate_ru_en", "translate_en_ru") and self.llm_translate is not None:
+            return self.llm_translate
+        return self.llama
+
     # ----------------------------------------------------------------- routing
     def asr_model_ids(self) -> list[str]:
         ids = []
@@ -81,20 +124,54 @@ class Registry:
 
     def tts_model_ids(self) -> list[str]:
         ids = [m["id"] for m in self.cfg["backends"]["audiocpp"].get("models", []) if m.get("task") == "tts"]
+        if self.omnivoice is not None:
+            for mid in self.omnivoice.models:
+                if mid not in ids:
+                    ids.append(mid)
         if self.audiocpp_clone is not None:
             for m in self.audiocpp_clone.cfg.get("models", []):
                 if m.get("task") == "tts" and m["id"] not in ids:
                     ids.append(m["id"])
         return ids
 
-    def tts_backend(self, model_id: str) -> AudioCppBackend:
-        """The process that serves this TTS model (clone helper when it owns it)."""
+    def tts_backend(self, model_id: str) -> "AudioCppBackend | OmnivoiceBackend":
+        """The process that serves this TTS model (cloning engine first)."""
+        if self.omnivoice is not None and model_id in self.omnivoice.models:
+            return self.omnivoice
         if self.audiocpp_clone is not None and model_id in self.audiocpp_clone.models:
             return self.audiocpp_clone
         return self.audiocpp
 
     def tts_backend_name(self, model_id: str) -> str:
-        return "audiocpp_clone" if self.tts_backend(model_id) is self.audiocpp_clone else "audiocpp"
+        backend = self.tts_backend(model_id)
+        if backend is self.omnivoice:
+            return "omnivoice"
+        return "audiocpp_clone" if backend is self.audiocpp_clone else "audiocpp"
+
+    def diar_model_ids(self) -> list[str]:
+        """Diarisation models, from their own process or the main one."""
+        ids: list[str] = []
+        for section in ("audiocpp_diar", "audiocpp"):
+            for m in self.cfg["backends"].get(section, {}).get("models", []):
+                if m.get("task") == "diar" and m["id"] not in ids:
+                    ids.append(m["id"])
+        return ids
+
+    def diar_backend(self, model_id: str) -> AudioCppBackend:
+        """The process that serves this diarisation model."""
+        if self.audiocpp_diar is not None and model_id in self.audiocpp_diar.models:
+            return self.audiocpp_diar
+        return self.audiocpp
+
+    def resolve_diar(self, model: str | None) -> str:
+        """Map a requested id to a configured task-`diar` model."""
+        available = self.diar_model_ids()
+        if not available:
+            raise KeyError("no diarisation model is configured")
+        target = (model or available[0]).strip()
+        if target not in available:
+            raise KeyError(f"unknown diarisation model '{target}'; available: {', '.join(available)}")
+        return target
 
     def resolve_asr(self, model: str | None) -> tuple[str, str]:
         """Map a requested model id to (backend, model_id). Raises KeyError when unknown."""
@@ -110,18 +187,37 @@ class Registry:
             return "audiocpp", target
         raise KeyError(f"unknown ASR model '{target}'; available: {', '.join(self.asr_model_ids())}")
 
+    def _tts_model(self, model_id: str) -> dict[str, Any] | None:
+        """The config entry for a TTS model, from any TTS-serving process."""
+        entry = self.audiocpp.models.get(model_id)
+        if entry is None and self.omnivoice is not None:
+            entry = self.omnivoice.models.get(model_id)
+        if entry is None and self.audiocpp_clone is not None:
+            entry = self.audiocpp_clone.models.get(model_id)
+        return entry
+
     def resolve_tts(self, model: str | None, text: str = "") -> str:
         target = (model or "").strip()
         if target in ("", "default", "tts", "auto"):
             default = self.cfg["tts"].get("default", "auto")
             if default in ("", "auto"):
-                # Voice ids are not a reliable language hint: piper builds can be
-                # English-only. Only the clone model can speak Russian here, and
-                # the caller must supply a reference profile for it.
-                if has_cyrillic(text) and "qwen3-tts-clone" in self.tts_model_ids():
-                    return "qwen3-tts-clone"
-                builtin = [i for i in self.tts_model_ids() if i != "qwen3-tts-clone"]
-                return builtin[0] if builtin else (self.tts_model_ids()[0] if self.tts_model_ids() else "")
+                # Auto routing is by the text's script and the model entries'
+                # `language` hint. A small per-language built-in (Kokoro en,
+                # Piper-ru) wins over the clone model: cloning is for explicit
+                # voice profiles, not everyday speech.
+                ids = self.tts_model_ids()
+                lang = "ru" if has_cyrillic(text) else "en"
+                clone_id = self.cfg["tts"].get("clone_model", "omnivoice-q8")
+                builtin = [
+                    i for i in ids
+                    if i != clone_id and str((self._tts_model(i) or {}).get("language", "")).lower() == lang
+                ]
+                if builtin:
+                    return builtin[0]
+                if lang == "ru" and clone_id in ids:
+                    return clone_id
+                rest = [i for i in ids if i != clone_id]
+                return rest[0] if rest else (ids[0] if ids else "")
             return default
         if target not in self.tts_model_ids():
             raise KeyError(f"unknown TTS model '{target}'; available: {', '.join(self.tts_model_ids())}")
@@ -131,10 +227,15 @@ class Registry:
     async def status(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "audiocpp": {**self.audiocpp.proc.status(), "models": await self.audiocpp.loaded_models()},
+            "omnivoice": self.omnivoice.status() if self.omnivoice is not None else None,
             "audiocpp_clone": (
                 {**self.audiocpp_clone.proc.status(), "models": await self.audiocpp_clone.loaded_models()}
                 if self.audiocpp_clone is not None
                 else None
+            ),
+            "audiocpp_diar": (
+                {**self.audiocpp_diar.proc.status(), "models": await self.audiocpp_diar.loaded_models()}
+                if self.audiocpp_diar is not None else None
             ),
             "llm": self.llama.proc.status() if self.llama else None,
             "whisper": self.whisper.proc.status() if self.whisper else None,
@@ -146,7 +247,8 @@ class Registry:
             task.cancel()     # warm-ups must not start an engine during shutdown
         if self.background_tasks:
             await asyncio.gather(*self.background_tasks, return_exceptions=True)
-        for backend in (self.audiocpp, self.audiocpp_clone, self.whisper, self.llama):
+        for backend in (self.audiocpp, self.audiocpp_diar, self.omnivoice, self.audiocpp_clone,
+                        self.whisper, self.llama, self.llm_translate):
             if backend is not None:
                 try:
                     await backend.stop()
@@ -155,16 +257,24 @@ class Registry:
 
     # ------------------------------------------------------------ compute
     def backend_process(self, group: str) -> ManagedProcess | None:
-        """The supervised process behind a compute group (see compute.GROUPS)."""
+        """The supervised HTTP process behind a compute group (see compute.GROUPS).
+
+        The omnivoice group is a piped CLI without a ManagedProcess; its busy
+        state is checked directly in busy_reason.
+        """
         if group == "llm":
             return self.llama.proc if self.llama else None
-        if group == "clone":
-            return self.audiocpp_clone.proc if self.audiocpp_clone else None
         if group == "main":
             return self.audiocpp.proc
+        if group == "diar":
+            return self.audiocpp_diar.proc if self.audiocpp_diar else None
         return None
 
     def busy_reason(self, group: str) -> str | None:
+        if group == "clone" and self.omnivoice is not None:
+            if self.omnivoice.status()["leases"] > 0:
+                return "clone: a request is in progress"
+            return None
         proc = self.backend_process(group)
         if proc is None:
             return None
@@ -195,9 +305,12 @@ class Registry:
         if reasons:
             raise ComputeBusy("; ".join(reasons))
         for group in changes:
-            proc = self.backend_process(group)
-            if proc is not None:
-                await proc.stop()
+            if group == "clone" and self.omnivoice is not None:
+                await self.omnivoice.stop()
+            else:
+                proc = self.backend_process(group)
+                if proc is not None:
+                    await proc.stop()
         compute.apply_to_config(self.cfg, changes)
         compute.save_overrides(self.cfg["_root"], changes)
         for group in changes:
@@ -209,6 +322,8 @@ class Registry:
         if group == "main":
             self.audiocpp = AudioCppBackend(bcfg["audiocpp"], self.state_dir, self.log_dir)
         elif group == "clone":
-            self.audiocpp_clone = AudioCppBackend(bcfg["audiocpp_clone"], self.state_dir, self.log_dir)
+            self.omnivoice = OmnivoiceBackend(bcfg["omnivoice"], self.log_dir)
+        elif group == "diar":
+            self.audiocpp_diar = AudioCppBackend(bcfg["audiocpp_diar"], self.state_dir, self.log_dir)
         else:
             self.llama = LlamaBackend(bcfg["llama"], self.log_dir)

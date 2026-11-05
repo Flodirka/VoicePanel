@@ -3,6 +3,7 @@
 #include "app/SettingsDialog.h"
 #include "app/UiKit.h"
 #include "app/VoicePlaybackDialog.h"
+#include "core/AudioMeter.h"
 #include "core/DictationController.h"
 #include "core/MarkdownStore.h"
 #include "core/ServiceClient.h"
@@ -134,6 +135,8 @@ void MainWindow::buildUi() {
     auto *root = new QWidget;
     root->setObjectName("panelRoot");
     rootLayout_ = new QVBoxLayout(root);
+    // Two pixels outside the rounded shell keep the border and its shadow
+    // inside the window; the design-system insets live inside the bar.
     rootLayout_->setContentsMargins(2, 2, 2, 2);
     rootLayout_->setSpacing(0);
     compactBar_ = new QWidget;
@@ -141,7 +144,7 @@ void MainWindow::buildUi() {
     compactBar_->installEventFilter(this);
     compactBar_->setCursor(Qt::SizeAllCursor);
     barLayout_ = new QHBoxLayout(compactBar_);
-    barLayout_->setContentsMargins(10, 8, 10, 8);
+    barLayout_->setContentsMargins(16, 10, 16, 10);
     barLayout_->setSpacing(8);
     placementButton_ = new QPushButton;
     placementButton_->setObjectName("placementButton");
@@ -183,6 +186,62 @@ void MainWindow::buildUi() {
         expanded_ ? showCompact() : showExpanded();
     });
     barLayout_->addWidget(expandButton_);
+
+    // The two live modes live in their own window, but they must be findable
+    // from the panel itself, not only from the tray menu.
+    // Two verbs, two buttons: the interpreter speaks, the meeting window
+    // records a transcript. A drop-down hid both behind one icon.
+    liveButton_ = new QPushButton;
+    liveButton_->setObjectName(QStringLiteral("liveButton"));
+    liveButton_->setProperty("variant", "ghost");
+    liveButton_->setProperty("size", "icon");
+    liveButton_->setIcon(UiKit::icon("languages"));
+    liveButton_->setToolTip(tr("Live interpreter: your voice into a call"));
+    liveButton_->setFixedSize(36, 36);
+    liveButton_->setIconSize(QSize(20, 20));
+    liveButton_->setFocusPolicy(Qt::NoFocus);
+    liveButton_->setAccessibleName(tr("Live interpreter"));
+    connect(liveButton_, &QPushButton::clicked, this, [this]() { app_->openSession(0); });
+    barLayout_->addWidget(liveButton_);
+
+    meetingButton_ = new QPushButton;
+    meetingButton_->setObjectName(QStringLiteral("meetingButton"));
+    meetingButton_->setProperty("variant", "ghost");
+    meetingButton_->setProperty("size", "icon");
+    meetingButton_->setIcon(UiKit::icon("users"));
+    meetingButton_->setToolTip(tr("Meeting transcript: speakers, timestamps, saved text"));
+    meetingButton_->setFixedSize(36, 36);
+    meetingButton_->setIconSize(QSize(20, 20));
+    meetingButton_->setFocusPolicy(Qt::NoFocus);
+    meetingButton_->setAccessibleName(tr("Meeting transcript"));
+    connect(meetingButton_, &QPushButton::clicked, this, [this]() { app_->openSession(1); });
+    barLayout_->addWidget(meetingButton_);
+
+    voiceButton_ = new QPushButton;
+    voiceButton_->setObjectName(QStringLiteral("voiceButton"));
+    voiceButton_->setProperty("variant", "ghost");
+    voiceButton_->setProperty("size", "icon");
+    voiceButton_->setIcon(UiKit::icon("volume"));
+    voiceButton_->setToolTip(tr("Voice: type or dictate text, speak it, save it, or send it to a cable"));
+    voiceButton_->setFixedSize(36, 36);
+    voiceButton_->setIconSize(QSize(20, 20));
+    voiceButton_->setFocusPolicy(Qt::NoFocus);
+    voiceButton_->setAccessibleName(tr("Voice"));
+    connect(voiceButton_, &QPushButton::clicked, this, &MainWindow::openVoicePlayback);
+    barLayout_->addWidget(voiceButton_);
+
+    subtitlesButton_ = new QPushButton;
+    subtitlesButton_->setObjectName(QStringLiteral("subtitlesButton"));
+    subtitlesButton_->setProperty("variant", "ghost");
+    subtitlesButton_->setProperty("size", "icon");
+    subtitlesButton_->setIcon(UiKit::icon("captions"));
+    subtitlesButton_->setToolTip(tr("Subtitles for one application, with optional voice-over"));
+    subtitlesButton_->setFixedSize(36, 36);
+    subtitlesButton_->setIconSize(QSize(20, 20));
+    subtitlesButton_->setFocusPolicy(Qt::NoFocus);
+    subtitlesButton_->setAccessibleName(tr("Subtitles"));
+    connect(subtitlesButton_, &QPushButton::clicked, this, [this]() { app_->openSubtitles(); });
+    barLayout_->addWidget(subtitlesButton_);
 
     auto *placement = new QMenu(placementButton_);
     placement->setObjectName("placementMenu");
@@ -239,7 +298,7 @@ void MainWindow::buildUi() {
     editorShell->setObjectName("editorPage");
     previewLayout->addWidget(editorShell);
     auto *editor = new QVBoxLayout(editorShell);
-    editor->setContentsMargins(16, 16, 16, 10);
+    editor->setContentsMargins(24, 20, 24, 16);
     editor->setSpacing(12);
     auto *title = new QLabel(tr("Transcript preview"));
     title->setProperty("role", "dialogTitle");
@@ -753,7 +812,7 @@ void MainWindow::updateActions() {
 }
 
 void MainWindow::updateMicrophone(double rms) {
-    const double level = recording_ ? qBound(0.0, (20.0 * std::log10(qMax(rms, 1e-6)) + 60) / 60, 1.0) : 0;
+    const double level = recording_ ? AudioMeter::normalized(rms) : 0;
     microphoneLevel_ = recording_ ? microphoneLevel_ * 0.5 + level * 0.5 : 0;
     micButton_->setIcon(UiKit::microphoneIcon(microphoneLevel_, recording_));
 }
@@ -909,7 +968,10 @@ void MainWindow::updateDockLayout() {
     compactBar_->setMinimumSize(0, 0);
     compactBar_->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
     barLayout_->setDirection(vertical ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
-    barLayout_->setContentsMargins(vertical ? 8 : 10, 8, vertical ? 8 : 10, 8);
+    // Vertical rail: the buttons must stay centred in 52 px, so 8 px each side.
+    // Horizontal bar: space-4 (16 px) per the design tokens.
+    barLayout_->setContentsMargins(vertical ? 8 : 16, vertical ? 8 : 10,
+                                   vertical ? 8 : 16, vertical ? 8 : 10);
     langLabel_->setVisible(!vertical);
     statusLabel_->setVisible(!vertical);
     expandButton_->setText(vertical ? QString() : tr("Preview"));
@@ -919,12 +981,18 @@ void MainWindow::updateDockLayout() {
     expandButton_->style()->unpolish(expandButton_);
     expandButton_->style()->polish(expandButton_);
     if (vertical) {
-        compactBar_->setFixedSize(52, 228);
-        expandButton_->setFixedSize(36, 36);
-        setFixedSize(56, 232);
+        // The rail must size to its buttons: seven controls, one per row, plus
+        // the spacing and insets, or they are packed unevenly.
+        const int rows = 9;
+        const int spacing = 8;
+        const int barHeight = 2 * 8 + rows * 36 + (rows - 1) * spacing;
+        compactBar_->setFixedSize(52, barHeight);
+        setFixedSize(56, barHeight + 4);
     } else {
         compactBar_->setFixedHeight(52);
-        setFixedSize(640, 56);
+        // Nine controls plus the status text need a little more room than the
+        // original six.
+        setFixedSize(720, 56);
     }
 }
 

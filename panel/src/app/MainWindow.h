@@ -88,6 +88,10 @@ private:
     QPushButton *micButton_ = nullptr;
     QPushButton *placementButton_ = nullptr;
     QPushButton *expandButton_ = nullptr;
+    QPushButton *liveButton_ = nullptr;
+    QPushButton *meetingButton_ = nullptr;
+    QPushButton *voiceButton_ = nullptr;
+    QPushButton *subtitlesButton_ = nullptr;
     QPushButton *settingsButton_ = nullptr;
     QPushButton *insertButton_ = nullptr;
     QPushButton *copyButton_ = nullptr;

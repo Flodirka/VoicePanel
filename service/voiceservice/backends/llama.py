@@ -110,7 +110,14 @@ class LlamaBackend:
 
     async def complete(self, messages: list[dict[str, Any]], **kw: Any) -> dict[str, Any]:
         """Non-streaming completion returning the response JSON."""
+        # Backend-level template kwargs (config `chat_template_kwargs`) merge under
+        # per-request ones, so a model-specific template (e.g. PLaMo's target_lang)
+        # can be steered per request without touching its config.
+        ctk = dict(self.cfg.get("chat_template_kwargs") or {})
+        ctk.update(kw.pop("chat_template_kwargs", {}) or {})
         payload = {"messages": messages, "stream": False, **kw}
+        if ctk:
+            payload["chat_template_kwargs"] = ctk
         async with self.request(payload) as resp:
             resp.raise_for_status()
             return resp.json()

@@ -1,6 +1,11 @@
 #pragma once
 #include <QDialog>
 
+class QComboBox;
+class QPlainTextEdit;
+class QPushButton;
+class QLabel;
+
 namespace VoicePanel {
 class PanelApp;
 

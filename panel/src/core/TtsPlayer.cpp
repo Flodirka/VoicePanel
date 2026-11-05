@@ -308,6 +308,26 @@ void TtsPlayer::requestMore() {
     }
 }
 
+QList<QPair<int, QString>> TtsPlayer::listOutputDevices() {
+    QList<QPair<int, QString>> out;
+    out.append({-1, QObject::tr("System default")});
+    const UINT count = waveOutGetNumDevs();
+    for (UINT i = 0; i < count; ++i) {
+        WAVEOUTCAPSW caps{};
+        if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
+            out.append({int(i), QString::fromWCharArray(caps.szPname)});
+        }
+    }
+    return out;
+}
+
+void TtsPlayer::setOutputDevice(int id) {
+    if (id == outputDevice_) return;
+    outputDevice_ = id;
+    // A live device cannot change mid-stream: drop what is queued and reopen.
+    if (waveOut_) closeDevice();
+}
+
 bool TtsPlayer::deviceMatches(int rate, int channels) const {
     return waveOut_ && rate == deviceRate_ && channels == deviceChannels_;
 }
@@ -321,7 +341,8 @@ bool TtsPlayer::openDevice(int rate, int channels) {
     fmt.wBitsPerSample = 16;
     fmt.nBlockAlign = WORD(channels * 2);
     fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
-    if (waveOutOpen(reinterpret_cast<HWAVEOUT *>(&waveOut_), WAVE_MAPPER, &fmt,
+    const UINT target = outputDevice_ >= 0 ? UINT(outputDevice_) : UINT(WAVE_MAPPER);
+    if (waveOutOpen(reinterpret_cast<HWAVEOUT *>(&waveOut_), target, &fmt,
                     DWORD_PTR(waveOutProcStatic), DWORD_PTR(this),
                     CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
         waveOut_ = nullptr;

@@ -14,9 +14,18 @@ struct Settings {
     QString profile = "general";
     QString contextDocument;
     QString context;
-    QString asrModel = "default";      // service default | qwen3-asr | whisper
+    QString asrModel = "nemotron";     // nemotron everywhere; qwen3-asr | parakeet switchable
+    QString meetingModel = "nemotron-diar";  // task: diar, independent of ASR
+    bool meetingDiarize = true;        // label remote speakers when available
+    int meetingLanguage = 0;           // 0 auto/mixed | 1 Russian | 2 English
+    int liveOutgoing = 0;              // 0 translated | 1 verbatim | 2 captions only
+    int callLanguage = 0;              // 0 the other side speaks English | 1 Russian
+    bool speakCaptions = false;        // subtitles overlay also speaks the translation
+    int subtitlesLanguage = 0;         // 0 the captioned audio is English -> Russian | 1 the reverse
     QString language = "auto";         // auto | ru | en
     QString inputDevice;               // WASAPI capture device id ("" = default)
+    QString systemAudioDevice;         // render endpoint id captured as loopback ("" = default)
+    int outputDevice = -1;             // waveOut index for speech (virtual cable); -1 = default
     QString vadModel;                  // override path to silero_vad.onnx
 
     // VAD / utterance handling (all exposed in the settings dialog)
@@ -62,6 +71,14 @@ struct Settings {
     QString transcriptDirectory() const;
     void loadContext();
     bool saveContext(QString *errorOut = nullptr) const;
+
+    // Terms listed under a "Terminology" (Терминология / Glossary) heading in
+    // the context document: one per line, "- " bullets allowed. They are sent
+    // to the service as the request dictionary, so near-miss ASR renderings of
+    // them are fixed deterministically before the LLM runs (see
+    // voiceservice.processing.deterministic_pass) and the Windows spell
+    // checker does not flag them.
+    static QStringList termsFromContext(const QString &context);
 };
 
 } // namespace VoicePanel

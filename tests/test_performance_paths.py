@@ -116,7 +116,7 @@ def test_backend_requests_reuse_one_connection(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         for _ in range(3):
-            assert (await backend.transcribe(b"RIFF", model="qwen3-asr"))["text"] == "ok"
+            assert (await backend.transcribe(b"RIFF", model="nemotron"))["text"] == "ok"
         await backend.proc._close_http()
 
     try:
@@ -180,7 +180,7 @@ def service(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setenv("VOICE_SERVICE_AUTH_TOKEN", "")
     (tmp_path / "runtime").mkdir()
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("backends:\n  audiocpp_clone:\n    enabled: false\n", encoding="utf-8")
+    cfg.write_text("llm:\n  skip_if_clean: false\nbackends:\n  audiocpp_clone:\n    enabled: false\n  llama_translate:\n    enabled: false\n", encoding="utf-8")
     with TestClient(create_app(cfg), base_url="http://127.0.0.1") as client:
         yield client
 
@@ -236,7 +236,7 @@ def test_warmup_loads_asr_and_prefills_the_llm_prefix(service, monkeypatch) -> N
     assert resp.status_code == 202
     assert set(resp.json()["scheduled"]) == {"asr", "llm"}
     _wait_idle(registry)
-    assert calls["asr"] == ["qwen3-asr"]
+    assert calls["asr"] == ["nemotron"]
     messages, kw = calls["llm"][0]
     assert kw["max_tokens"] == 1
     real = build_messages("A sentence.", "correct_ru", context="Glossary: UCLASS.")[0]["content"]
@@ -266,7 +266,7 @@ def test_warmup_does_not_reload_a_resident_asr_model(service, monkeypatch) -> No
         return {"text": ""}
 
     async def loaded_models():
-        return [{"id": "qwen3-asr", "loaded": True}]
+        return [{"id": "nemotron", "loaded": True}]
 
     monkeypatch.setattr(type(registry.audiocpp.proc), "running", property(lambda self: True))
     monkeypatch.setattr(registry.audiocpp, "loaded_models", loaded_models)
@@ -332,8 +332,7 @@ def test_websocket_keeps_listening_and_orders_finals(tmp_path: Path, monkeypatch
     vad_file = tmp_path / "vad.onnx"
     vad_file.write_bytes(b"fake")
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "backends:\n  audiocpp_clone:\n    enabled: false\n"
+    cfg.write_text("llm:\n  skip_if_clean: false\nbackends:\n  audiocpp_clone:\n    enabled: false\n  llama_translate:\n    enabled: false\n"
         f"sessions:\n  vad_model: {vad_file.as_posix()}\n  speculative: false\n"
         "  silence_frames: 4\n  min_speech_frames: 2\n",
         encoding="utf-8",
@@ -423,8 +422,7 @@ def _ws_service(tmp_path: Path, monkeypatch):
     vad_file = tmp_path / "vad.onnx"
     vad_file.write_bytes(b"fake")
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "backends:\n  audiocpp_clone:\n    enabled: false\n"
+    cfg.write_text("llm:\n  skip_if_clean: false\nbackends:\n  audiocpp_clone:\n    enabled: false\n  llama_translate:\n    enabled: false\n"
         f"sessions:\n  vad_model: {vad_file.as_posix()}\n  speculative: false\n"
         "  silence_frames: 4\n  min_speech_frames: 2\n",
         encoding="utf-8",
