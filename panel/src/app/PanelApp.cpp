@@ -276,6 +276,9 @@ int PanelApp::runCaptureUi(const QString &outDir) {
     snap(window, "panel-bar");
     window.showExpanded();
     snap(window, "panel-expanded");
+    window.setLiveRecording(true);
+    snap(window, "panel-recording");
+    window.setLiveRecording(false);
 
     SessionWindow live(this);
     live.openMode(SessionWindow::Mode::Interpreter);

@@ -27,6 +27,7 @@ public:
     void showExpanded();
 
 public slots:
+    void setLiveRecording(bool recording);   // live sessions flip the mic badge
     void toggleDictation(bool reviewMode);
     void startDictation(bool reviewMode);
     void stopDictation();
@@ -77,7 +78,6 @@ private:
     void copyResult();
     void translateResult();
     void updateMicrophone(double rms = 0);
-    void setLiveRecording(bool recording);
 
     PanelApp *app_;
     QBoxLayout *rootLayout_ = nullptr;
