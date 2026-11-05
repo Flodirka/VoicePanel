@@ -77,6 +77,7 @@ private:
     void copyResult();
     void translateResult();
     void updateMicrophone(double rms = 0);
+    void setLiveRecording(bool recording);
 
     PanelApp *app_;
     QBoxLayout *rootLayout_ = nullptr;
@@ -115,6 +116,7 @@ private:
 
     bool expanded_ = false;
     bool recording_ = false;
+    bool liveRecording_ = false;
     bool finishing_ = false;
     bool reviewMode_ = true;
     bool sessionActive_ = false;

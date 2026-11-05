@@ -34,6 +34,10 @@ public:
     // VAD model, hotkeys, service /health — without a window, tray, message
     // loop or microphone. Returns 0 when every check passes.
     int runCheckBundle();
+    // Visual QA (--capture-ui DIR): render every window offscreen and save
+    // PNGs, no show(), no focus stealing, no message loop. Design-system
+    // checks grab these instead of eyeballing windows during test runs.
+    int runCaptureUi(const QString &outDir);
 
     Settings *settings() const { return settings_.get(); }
     ServiceClient *service() const { return service_.get(); }
@@ -48,6 +52,7 @@ public:
     // 0 = interpreter, 1 = meeting. Creates the window on first use and
     // starts listening immediately.
     void openSession(int mode);
+    void notifyRecording();
     // Compact always-on-top captions for one application (a video, a stream).
     void openSubtitles();
     QString vadPath() const { return vadPath_; }
@@ -70,6 +75,7 @@ private:
     SessionWindow *sessionWindow_ = nullptr;
     CaptionOverlay *overlay_ = nullptr;
     MeetingWindow *meetingWindow_ = nullptr;
+    int liveRecording_ = 0;
     QString vadPath_;
     QSystemTrayIcon *tray_ = nullptr;
     ::QLocalServer *singleServer_ = nullptr;

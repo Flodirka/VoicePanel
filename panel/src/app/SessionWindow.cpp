@@ -2,7 +2,8 @@
 #include "app/PanelApp.h"
 #include "app/UiKit.h"
 #include "audio/WasapiCapture.h"
-#include "core/DualLevelMeter.h"
+#include "core/AudioMeter.h"
+#include "core/LevelBadge.h"
 #include "core/SessionController.h"
 #include "core/Settings.h"
 #include "core/TtsPlayer.h"
@@ -78,10 +79,14 @@ SessionWindow::SessionWindow(PanelApp *app, QWidget *parent)
         stopSession();
         statusLabel_->setText(tr("Capture failed: %1").arg(text));
     });
-    connect(controller_, &SessionController::level, this,
-            [this](double rms) { meters_->setMicLevel(rms); });
-    connect(controller_, &SessionController::levelRemote, this,
-            [this](double rms) { meters_->setRemoteLevel(rms); });
+    connect(controller_, &SessionController::level, this, [this](double rms) {
+        micBadge_->setRecording(true);
+        micBadge_->setLevel(AudioMeter::normalized(rms));
+    });
+    connect(controller_, &SessionController::levelRemote, this, [this](double rms) {
+        remoteBadge_->setRecording(true);
+        remoteBadge_->setLevel(AudioMeter::normalized(rms));
+    });
     connect(app_->tts(), &TtsPlayer::started, this,
             [this]() { statusLabel_->setText(tr("Preview: playing")); });
     connect(app_->tts(), &TtsPlayer::finished, this, [this]() {
@@ -120,15 +125,22 @@ void SessionWindow::buildUi() {
         tab->setProperty("variant", "ghost");
         modeRow->addWidget(tab);
     }
-    // One always-visible meter for both sources, next to the tabs: while a
-    // session runs the user must see the mic and the call moving without
-    // opening the collapsed settings.
-    meters_ = new DualLevelMeter;
-    meters_->setObjectName(QStringLiteral("levelMeters"));
-    modeRow->addWidget(meters_);
+    // Two animated state badges next to the tabs: the microphone fills while
+    // it records, the speaker glyph reacts to call audio. Unlike the old bar
+    // meters they decay on their own timer, so a silent loopback never leaves
+    // a frozen bar behind.
+    micBadge_ = new LevelBadge(LevelBadge::Kind::Microphone);
+    micBadge_->setObjectName(QStringLiteral("micLevelBadge"));
+    micBadge_->setToolTip(tr("Microphone level"));
+    remoteBadge_ = new LevelBadge(LevelBadge::Kind::Remote);
+    remoteBadge_->setObjectName(QStringLiteral("remoteLevelBadge"));
+    remoteBadge_->setToolTip(tr("Call audio level"));
+    modeRow->addWidget(micBadge_);
+    modeRow->addWidget(remoteBadge_);
     modeRow->addStretch();
     refreshButton_ = new QPushButton(tr("Refresh"));
     refreshButton_->setProperty("variant", "ghost");
+    refreshButton_->setIcon(UiKit::icon("rotate-cw"));
     connect(refreshButton_, &QPushButton::clicked, this, [this] {
         refreshDevices();
         updateCableHint();
@@ -191,6 +203,7 @@ void SessionWindow::buildUi() {
     voiceRow->addWidget(outgoingBox_, 1);
     voiceRow->addWidget(voiceBox_, 1);
     previewButton_ = new QPushButton(tr("Preview"));
+    previewButton_->setIcon(UiKit::icon("audio-lines"));
     previewButton_->setProperty("variant", "ghost");
     voiceRow->addWidget(previewButton_);
     form->addRow(tr("Output voice"), voiceRow);
@@ -259,6 +272,7 @@ void SessionWindow::buildUi() {
     actions->setSpacing(8);
     startButton_ = new QPushButton(tr("Start"));
     startButton_->setObjectName(QStringLiteral("primary"));
+    startButton_->setIcon(UiKit::icon("play"));
     statusLabel_ = new QLabel(tr("Ready — press Start"));
     statusLabel_->setProperty("role", "muted");
     statusLabel_->setWordWrap(true);
@@ -295,17 +309,16 @@ void SessionWindow::updateExplanation() {
     heardLabel_->setText(interpreter ? tr("Said / heard  (▶ me   ◀ call)") : tr("Heard"));
     // Subtitles only listen: hide every microphone and outgoing-voice row
     // instead of leaving dead controls on screen.
+    // Hiding the widget alone leaves its row label behind — an orphaned
+    // caption over empty space. Hide the whole row instead.
     settingsForm_->setRowVisible(micBox_, interpreter);
     settingsForm_->setRowVisible(speakBox_, interpreter);
     settingsForm_->setRowVisible(outgoingBox_, interpreter);
     settingsForm_->setRowVisible(voiceBox_, interpreter);
     translatedPane_->setVisible(interpreter);
-    speakBox_->setVisible(interpreter);
-    outgoingBox_->setVisible(interpreter);
-    voiceBox_->setVisible(interpreter && mode_ == Mode::Interpreter);
     previewButton_->setVisible(interpreter);
     // Meeting controls belong to the meeting window now.
-    callLanguageBox_->setVisible(interpreter);
+    settingsForm_->setRowVisible(callLanguageBox_, interpreter);
     callLanguageBox_->setCurrentIndex(callLanguageBox_->findData(app_->settings()->callLanguage));
     if (!interpreter) {
         heardEdit_->clear();
@@ -465,7 +478,13 @@ void SessionWindow::appendLine(const QString &text) {
 
 void SessionWindow::setRunning(bool running) {
     running_ = running;
+    emit recordingChanged(running);
     startButton_->setText(running ? tr("Stop") : tr("Start"));
+    startButton_->setIcon(UiKit::icon(running ? "stop" : "play"));
+    if (!running) {
+        micBadge_->reset();
+        remoteBadge_->reset();
+    }
     settingsToggle_->setEnabled(true);
     micBox_->setEnabled(!running);
     callBox_->setEnabled(!running);

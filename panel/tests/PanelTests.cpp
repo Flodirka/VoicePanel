@@ -9,7 +9,7 @@
 #include "app/ServiceTray.h"
 #include "core/AudioMeter.h"
 #include "core/DictationController.h"
-#include "core/DualLevelMeter.h"
+#include "core/LevelBadge.h"
 #include "core/MarkdownStore.h"
 #include "core/ServiceClient.h"
 #include "core/SessionController.h"
@@ -1610,17 +1610,19 @@ private slots:
         window.hide();
     }
 
-    void liveAndMeetingWindowsHaveOneSharedMeterNotTwoSettingRows() {
-        // The mic and call levels live in one always-visible DualLevelMeter in
-        // the top row; the old design had two QProgressBar rows buried in the
-        // collapsed settings, with a different scale than the panel's icon.
+    void liveAndMeetingWindowsHaveLevelBadgesNotBars() {
+        // The mic and call levels are two animated badges in the top row (the
+        // microphone fills, the speaker reacts to call audio); the old design
+        // had bar meters that froze whenever loopback capture went quiet.
         SessionWindow live(app_);
-        QCOMPARE(live.findChildren<DualLevelMeter *>(QStringLiteral("levelMeters")).size(), 1);
+        QCOMPARE(live.findChildren<LevelBadge *>(QStringLiteral("micLevelBadge")).size(), 1);
+        QCOMPARE(live.findChildren<LevelBadge *>(QStringLiteral("remoteLevelBadge")).size(), 1);
         QVERIFY(live.findChildren<QProgressBar *>().isEmpty());
         MeetingWindow meeting(app_);
-        QCOMPARE(meeting.findChildren<DualLevelMeter *>(QStringLiteral("levelMeters")).size(), 1);
+        QCOMPARE(meeting.findChildren<LevelBadge *>(QStringLiteral("micLevelBadge")).size(), 1);
+        QCOMPARE(meeting.findChildren<LevelBadge *>(QStringLiteral("remoteLevelBadge")).size(), 1);
         QVERIFY(meeting.findChildren<QProgressBar *>().isEmpty());
-        // One shared RMS mapping everywhere: the panel icon and the meter agree.
+        // One shared RMS mapping everywhere: the panel icon and the badges agree.
         QCOMPARE(AudioMeter::normalized(0.0), 0.0);
         QVERIFY(AudioMeter::normalized(0.2) > 0.5);
         QCOMPARE(AudioMeter::normalized(1.0), 1.0);
@@ -1895,6 +1897,11 @@ private slots:
     }
 
     void insertionPreservesExistingTextAndDoesNotSubmit() {
+        // Stealing the real desktop focus races with whatever the user is
+        // doing; run this check explicitly (VOICEPANEL_TARGET_TEST) like the
+        // other target-field tests.
+        if (!qEnvironmentVariableIsSet("VOICEPANEL_TARGET_TEST"))
+            QSKIP("Opt-in: set VOICEPANEL_TARGET_TEST to verify insertion on the live desktop");
         if (QGuiApplication::platformName() != "windows") QSKIP("Requires the Windows desktop");
         QLineEdit target("before after");
         target.setWindowTitle("VoicePanel insertion regression");

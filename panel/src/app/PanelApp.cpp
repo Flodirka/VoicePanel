@@ -1,6 +1,9 @@
 #include "app/PanelApp.h"
 
 #include "app/MainWindow.h"
+#include <QDir>
+#include <QDebug>
+
 #include "app/CaptionOverlay.h"
 #include "app/MeetingWindow.h"
 #include "app/SessionWindow.h"
@@ -228,14 +231,25 @@ int PanelApp::run() {
     tray_->setIcon(window_->windowIcon());
     tray_->setToolTip(tr("Voice panel"));
     auto *menu = new QMenu(window_);
-    menu->addAction(tr("Show panel"), window_, &MainWindow::showExpanded);
-    menu->addAction(tr("Start dictation"), window_, [this]() { window_->startDictation(false); });
-    menu->addAction(tr("Voice playback…"), window_, &MainWindow::openVoicePlayback);
-    menu->addAction(tr("Live interpreter…"), window_, [this]() { openSession(0); });
-    menu->addAction(tr("Meeting transcript…"), window_, [this]() { openSession(1); });
-    menu->addAction(tr("Subtitles overlay…"), window_, [this]() { openSubtitles(); });
-    menu->addAction(tr("Settings..."), window_, &MainWindow::openSettings);
-    menu->addAction(tr("Quit"), qApp, &QApplication::quit);
+    // Same Lucide glyphs as their in-app counterparts, so tray entries and
+    // window controls never suggest different features by accident.
+    auto *showPanel = menu->addAction(tr("Show panel"), window_, &MainWindow::showExpanded);
+    showPanel->setIcon(UiKit::icon("text-box"));
+    auto *dictate = menu->addAction(tr("Start dictation"), window_,
+                                    [this]() { window_->startDictation(false); });
+    dictate->setIcon(UiKit::icon("mic"));
+    auto *playback = menu->addAction(tr("Voice playback…"), window_, &MainWindow::openVoicePlayback);
+    playback->setIcon(UiKit::icon("volume"));
+    auto *interpreter = menu->addAction(tr("Live interpreter…"), window_, [this]() { openSession(0); });
+    interpreter->setIcon(UiKit::icon("languages"));
+    auto *meeting = menu->addAction(tr("Meeting transcript…"), window_, [this]() { openSession(1); });
+    meeting->setIcon(UiKit::icon("users"));
+    auto *subtitles = menu->addAction(tr("Subtitles overlay…"), window_, [this]() { openSubtitles(); });
+    subtitles->setIcon(UiKit::icon("captions"));
+    auto *settings = menu->addAction(tr("Settings..."), window_, &MainWindow::openSettings);
+    settings->setIcon(UiKit::icon("cog"));
+    auto *quit = menu->addAction(tr("Quit"), qApp, &QApplication::quit);
+    quit->setIcon(UiKit::icon("close"));
     tray_->setContextMenu(menu);
     connect(tray_, &QSystemTrayIcon::activated, window_, [this](QSystemTrayIcon::ActivationReason r) {
         if (r == QSystemTrayIcon::DoubleClick) window_->showExpanded();
@@ -243,4 +257,40 @@ int PanelApp::run() {
     tray_->show();
     voices_->refresh();
     return exec();
+}
+
+int PanelApp::runCaptureUi(const QString &outDir) {
+    // Offscreen rendering of every surface for visual QA: grab() paints the
+    // widget with its real style and fonts without showing or focusing
+    // anything, so a design check never fights the user for the desktop.
+    QDir().mkpath(outDir);
+    int saved = 0;
+    const auto snap = [&outDir, &saved](QWidget &widget, const QString &name) {
+        widget.adjustSize();
+        const QPixmap shot = widget.grab();
+        const QString path = outDir + "/" + name + ".png";
+        if (shot.save(path)) ++saved;
+    };
+
+    MainWindow window(this);
+    snap(window, "panel-bar");
+    window.showExpanded();
+    snap(window, "panel-expanded");
+
+    SessionWindow live(this);
+    live.openMode(SessionWindow::Mode::Interpreter);
+    snap(live, "session-interpreter");
+    live.openMode(SessionWindow::Mode::Subtitles);
+    snap(live, "session-subtitles");
+
+    MeetingWindow meeting(this);
+    snap(meeting, "meeting");
+
+    CaptionOverlay overlay(this);
+    snap(overlay, "caption-overlay");
+
+    window.hide();
+    live.hide();
+    qDebug().noquote() << QStringLiteral("capture-ui: %1 frame(s) in %2").arg(saved).arg(outDir);
+    return saved >= 6 ? 0 : 1;
 }

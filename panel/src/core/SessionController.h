@@ -99,6 +99,7 @@ private:
         int speaker = 0;
     };
     int canonicalSpeaker(double start, double end);
+    static QString speakerLabel(int canonical);
     void startDiarize(std::function<void()> then);
     bool looksLikeBleed(const QString &text) const;
     static QString comparable(const QString &text);

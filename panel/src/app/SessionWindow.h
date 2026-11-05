@@ -10,7 +10,7 @@ class QTextEdit;
 
 namespace VoicePanel {
 
-class DualLevelMeter;
+class LevelBadge;
 class PanelApp;
 class SessionController;
 
@@ -32,6 +32,9 @@ public:
 
     void openMode(Mode mode);
     void stopSession();
+
+signals:
+    void recordingChanged(bool recording);
 
 private:
     void buildUi();
@@ -65,7 +68,8 @@ private:
     QPushButton *startButton_ = nullptr;
     QPushButton *closeButton_ = nullptr;
     QPushButton *refreshButton_ = nullptr;
-    DualLevelMeter *meters_ = nullptr;
+    LevelBadge *micBadge_ = nullptr;
+    LevelBadge *remoteBadge_ = nullptr;
     QFormLayout *settingsForm_ = nullptr;
     QLabel *cableHint_ = nullptr;
     QLabel *statusLabel_ = nullptr;

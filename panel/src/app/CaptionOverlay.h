@@ -2,6 +2,10 @@
 #include <QPoint>
 #include <QWidget>
 
+namespace VoicePanel {
+class LevelBadge;
+}
+
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -36,6 +40,9 @@ protected:
     // top-level widget is not painted, which left the text on bare screen.
     void paintEvent(QPaintEvent *event) override;
 
+signals:
+    void recordingChanged(bool recording);
+
 private:
     void buildUi();
     void refreshSources();
@@ -47,6 +54,7 @@ private:
     QComboBox *source_ = nullptr;
     QComboBox *direction_ = nullptr;
     QCheckBox *voice_ = nullptr;
+    LevelBadge *micBadge_ = nullptr;
     QPushButton *close_ = nullptr;
     QLabel *heard_ = nullptr;
     QLabel *translated_ = nullptr;

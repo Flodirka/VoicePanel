@@ -33,25 +33,30 @@ ServiceTray::ServiceTray(const QString &url, QObject *parent)
     address->setEnabled(false);
     menu_->addSeparator();
     auto *open = menu_->addAction(tr("Open panel"));
+    open->setIcon(UiKit::icon("mic"));
     connect(open, &QAction::triggered, this, []() {
         QProcess::startDetached(QCoreApplication::applicationFilePath(), {});
     });
     auto *settings = menu_->addAction(tr("Server settings…"));
+    settings->setIcon(UiKit::icon("cog"));
     settings->setObjectName("serverSettings");
     connect(settings, &QAction::triggered, this, [this]() {
         ServerSettingsDialog dialog(url_);
         dialog.exec();
     });
     start_ = menu_->addAction(tr("Start service"));
+    start_->setIcon(UiKit::icon("play"));
     start_->setObjectName("startService");
     start_->setEnabled(false);
     connect(start_, &QAction::triggered, this, &ServiceTray::startService);
     stop_ = menu_->addAction(tr("Stop service"));
+    stop_->setIcon(UiKit::icon("stop"));
     stop_->setObjectName("stopService");
     stop_->setEnabled(false);
     connect(stop_, &QAction::triggered, this, &ServiceTray::stopService);
     menu_->addSeparator();
     auto *quit = menu_->addAction(tr("Close tray icon"));
+    quit->setIcon(UiKit::icon("close"));
     connect(quit, &QAction::triggered, qApp, &QApplication::quit);
     icon_.setObjectName("serviceTrayIcon");
     icon_.setContextMenu(menu_.get());

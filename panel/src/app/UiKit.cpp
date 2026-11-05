@@ -47,11 +47,15 @@ QIcon icon(const QString &name, const QColor &color) {
     QByteArray svg = file.readAll().replace("currentColor", color.name().toUtf8());
     QSvgRenderer renderer(svg);
     QIcon result;
+    // Render at 2x and tag the pixmap: icons stay crisp at 125-200 % DPI
+    // instead of being upscaled from a 1x raster.
+    const qreal dpr = qApp ? qApp->devicePixelRatio() : 1.0;
     for (int size : {16, 20, 24, 32, 48, 64}) {
-        QPixmap pixmap(size, size);
+        QPixmap pixmap(int(size * dpr), int(size * dpr));
+        pixmap.setDevicePixelRatio(dpr);
         pixmap.fill(Qt::transparent);
         QPainter painter(&pixmap);
-        renderer.render(&painter);
+        renderer.render(&painter, QRectF(0, 0, size, size));
         painter.end();
         result.addPixmap(pixmap);
     }
@@ -60,6 +64,7 @@ QIcon icon(const QString &name, const QColor &color) {
 
 QIcon microphoneIcon(double level, bool recording) {
     QPixmap pixmap(48, 48);
+    pixmap.setDevicePixelRatio(2.0);   // 48 px raster shown at 24 px: crisp
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
@@ -81,9 +86,11 @@ QIcon microphoneIcon(double level, bool recording) {
     painter.drawLine(QPointF(19, 10), QPointF(19, 12));
     painter.drawLine(QPointF(12, 19), QPointF(12, 22));
     if (recording) {
-        painter.setBrush(ink);
+        // Design tokens: an active/recording badge is soft amber
+        // (badge-active-fg on dark), never the error red.
+        painter.setBrush(QColor("#f4b66e"));
         painter.setPen(Qt::NoPen);
-        painter.drawEllipse(QPointF(21, 3), 1.5, 1.5);
+        painter.drawEllipse(QPointF(21, 3), 2.2, 2.2);
     }
     painter.end();
     return QIcon(pixmap);
@@ -117,6 +124,9 @@ QWidget *wrapDialog(QDialog &dlg, const QString &title) {
     auto *titleLabel = new QLabel(title, header);
     titleLabel->setProperty("role", "dialogTitle");
     headLay->addWidget(titleLabel, 1);
+    // Windows that switch modes (live interpreter <-> subtitles) change their
+    // window title; the frameless header must follow, not freeze on the first.
+    QObject::connect(&dlg, &QDialog::windowTitleChanged, titleLabel, &QLabel::setText);
     auto *closeBtn = new QPushButton(header);
     closeBtn->setProperty("variant", "ghost");
     closeBtn->setProperty("size", "icon");

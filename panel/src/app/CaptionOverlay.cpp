@@ -2,6 +2,7 @@
 #include "app/PanelApp.h"
 #include "app/UiKit.h"
 #include "audio/WasapiCapture.h"
+#include "core/LevelBadge.h"
 #include "core/SessionController.h"
 #include "core/Settings.h"
 #include "core/TtsPlayer.h"
@@ -66,6 +67,12 @@ void CaptionOverlay::buildUi() {
     voice_->setToolTip(tr("Speak the translation with the cloned voice"));
     row->addWidget(voice_);
     row->addStretch();
+    // Live state: the microphone glyph fills while captioning runs, so an
+    // always-on-top overlay is visibly "recording", not just visible.
+    micBadge_ = new LevelBadge(LevelBadge::Kind::Microphone);
+    micBadge_->setObjectName(QStringLiteral("captionMicBadge"));
+    micBadge_->setToolTip(tr("Captioning"));
+    row->addWidget(micBadge_);
     close_ = new QPushButton;
     close_->setProperty("variant", "ghost");
     close_->setProperty("size", "icon");
@@ -80,8 +87,10 @@ void CaptionOverlay::buildUi() {
     heard_->setObjectName(QStringLiteral("captionHeard"));
     heard_->setWordWrap(true);
     QFont small = heard_->font();
-    small.setPointSize(10);
+    small.setPixelSize(13);
     heard_->setFont(small);
+    // A long source line must not push the translation off the card.
+    heard_->setMaximumHeight(36);
     layout->addWidget(heard_);
 
     translated_ = new QLabel(QString());
@@ -89,7 +98,7 @@ void CaptionOverlay::buildUi() {
     translated_->setWordWrap(true);
     translated_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     QFont big = translated_->font();
-    big.setPointSize(17);
+    big.setPixelSize(23);
     big.setWeight(QFont::DemiBold);
     translated_->setFont(big);
     layout->addWidget(translated_, 1);
@@ -99,7 +108,7 @@ void CaptionOverlay::buildUi() {
         "#captionHeard { color: #c9bd9a; background: transparent; }"
         "#captionTranslated { color: #faf1cc; background: transparent; }"
         "#captionOverlay QComboBox { background-color: #19141f; color: #faf1cc;"
-        " border: 1px solid rgba(250, 241, 204, 0.18); border-radius: 8px; padding: 4px 8px; }"
+        " border: 1px solid rgba(250, 241, 204, 0.16); border-radius: 8px; padding: 4px 8px; }"
         "#captionOverlay QCheckBox { color: #faf1cc; background: transparent; }"
         "#captionOverlay QLabel { color: #faf1cc; background: transparent; }"));
 
@@ -193,6 +202,8 @@ void CaptionOverlay::begin() {
         return;
     }
     running_ = true;
+    micBadge_->setRecording(true);
+    emit recordingChanged(true);
     show();
     raise();
 }
@@ -201,6 +212,8 @@ void CaptionOverlay::end() {
     if (!running_) return;
     controller_->stop();
     running_ = false;
+    micBadge_->reset();
+    emit recordingChanged(false);
 }
 
 void CaptionOverlay::paintEvent(QPaintEvent *) {

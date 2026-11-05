@@ -39,7 +39,7 @@ set(PANEL_SOURCES
   src/core/TextDiff.cpp
   src/core/SpellingChecker.cpp
   src/core/AudioMeter.cpp
-  src/core/DualLevelMeter.cpp
+  src/core/LevelBadge.cpp
   src/core/TtsPlayer.cpp
   src/core/MarkdownStore.cpp
   src/core/VoiceProfiles.cpp

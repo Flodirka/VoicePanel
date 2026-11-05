@@ -220,10 +220,19 @@ void SessionController::finishCurrent(const QString &text) {
             QStringList pieces;
             QList<double> offsets;
             if (!turns.isEmpty()) {
-                for (const Turn &turn : turns) {
-                    speakers << turn.speaker;
+                for (int t = 0; t < turns.size(); ++t) {
+                    const Turn &turn = turns[t];
+                    // The recogniser's [Sxx] numbers restart per recognition
+                    // window; a 3-person call would surface every renumbering
+                    // as a new participant. Canonical identity comes from the
+                    // phrase timeline instead, like the separate diariser.
+                    const double start = job.at + turn.at;
+                    const double end = t + 1 < turns.size()
+                        ? qMax(start + 0.5, job.at + turns[t + 1].at)
+                        : start + 4.0;
+                    speakers << speakerLabel(canonicalSpeaker(start, end));
                     pieces << turn.text;
-                    offsets << job.at + turn.at;
+                    offsets << start;
                 }
             } else {
                 speakers << (pendingSpeaker_.isEmpty() ? tr("Others") : pendingSpeaker_);
@@ -380,6 +389,11 @@ int SessionController::canonicalSpeaker(double start, double end) {
     // restart at "Speaker 1". A phrase usually starts after a pause, so the
     // match allows a small gap around each known turn — otherwise a speaker who
     // merely pauses between phrases would get a new number every time.
+    //
+    // `start`/`end` are on the ABSOLUTE session clock (the LiveSession `at` of
+    // the phrase, plus per-turn offsets). The diariser's rolling buffer trims
+    // its own head over time; matching on its shifted per-window times instead
+    // manufactured a new speaker for every phrase once trimming started.
     static constexpr double kSpeakerGap = 2.0;   // seconds of tolerated silence
     double best = 0.0;
     int matched = 0;
@@ -397,6 +411,10 @@ int SessionController::canonicalSpeaker(double start, double end) {
     knownTurns_.append({start, end, matched});
     while (knownTurns_.size() > 400) knownTurns_.removeFirst();
     return matched;
+}
+
+QString SessionController::speakerLabel(int canonical) {
+    return canonical > 0 ? tr("Speaker %1").arg(canonical) : tr("Others");
 }
 
 void SessionController::startDiarize(std::function<void()> then) {
@@ -454,7 +472,12 @@ void SessionController::startDiarize(std::function<void()> then) {
                     + turn.value(QStringLiteral("end_sample")).toDouble() / 16000.0;
                 if (end <= phraseStart + 0.05 || start >= phraseEnd + 0.05 || end <= start)
                     continue;
-                const int canonical = canonicalSpeaker(start, end);
+                // Known-turn identity is stored on the absolute session clock:
+                // the rolling buffer's head gets trimmed, so per-window times
+                // would drift and match nothing after a couple of minutes.
+                const double absStart = start + timelineStartAt_;
+                const double absEnd = end + timelineStartAt_;
+                const int canonical = canonicalSpeaker(absStart, absEnd);
                 spoken[canonical] += qMax(0.0, qMin(end, phraseEnd) - qMax(start, phraseStart));
             }
             int dominant = 0;
@@ -465,7 +488,7 @@ void SessionController::startDiarize(std::function<void()> then) {
                     dominant = it.key();
                 }
             }
-            if (dominant) pendingSpeaker_ = tr("Speaker %1").arg(dominant);
+            if (dominant) pendingSpeaker_ = speakerLabel(dominant);
         } else if (!ok && !error.isEmpty()) {
             emit this->error(tr("Speaker separation failed: %1").arg(error));
         }

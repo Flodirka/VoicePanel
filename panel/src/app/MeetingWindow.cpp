@@ -2,7 +2,8 @@
 #include "app/PanelApp.h"
 #include "app/UiKit.h"
 #include "audio/WasapiCapture.h"
-#include "core/DualLevelMeter.h"
+#include "core/AudioMeter.h"
+#include "core/LevelBadge.h"
 #include "core/SessionController.h"
 #include "core/Settings.h"
 
@@ -64,9 +65,15 @@ MeetingWindow::MeetingWindow(PanelApp *app, QWidget *parent) : QDialog(parent), 
         menu.exec(transcript_->mapToGlobal(at));
     });
     connect(controller_, &SessionController::level, this,
-            [this](double rms) { meters_->setMicLevel(rms); });
+            [this](double rms) {
+                micBadge_->setRecording(true);
+                micBadge_->setLevel(AudioMeter::normalized(rms));
+            });
     connect(controller_, &SessionController::levelRemote, this,
-            [this](double rms) { meters_->setRemoteLevel(rms); });
+            [this](double rms) {
+                remoteBadge_->setRecording(true);
+                remoteBadge_->setLevel(AudioMeter::normalized(rms));
+            });
     connect(controller_, &SessionController::status, this,
             [this](const QString &text) { statusLabel_->setText(text); });
     connect(controller_, &SessionController::error, this,
@@ -87,17 +94,26 @@ void MeetingWindow::buildUi() {
     // Settings are collapsed by default, as in the live window: the transcript
     // is what a meeting needs on screen, not six device rows.
     auto *topRow = new QHBoxLayout;
-    // One always-visible meter for both sources, next to the buttons: seeing
-    // both move is the quickest proof that the right devices are open.
-    meters_ = new DualLevelMeter;
-    meters_->setObjectName(QStringLiteral("levelMeters"));
-    topRow->addWidget(meters_);
+    // Two animated state badges next to the buttons: the microphone fills
+    // while it records, the speaker glyph reacts to call audio. Unlike the
+    // old bar meters they decay on their own timer, so a silent loopback
+    // never leaves a frozen bar behind.
+    micBadge_ = new LevelBadge(LevelBadge::Kind::Microphone);
+    micBadge_->setObjectName(QStringLiteral("micLevelBadge"));
+    micBadge_->setToolTip(tr("Microphone level"));
+    remoteBadge_ = new LevelBadge(LevelBadge::Kind::Remote);
+    remoteBadge_->setObjectName(QStringLiteral("remoteLevelBadge"));
+    remoteBadge_->setToolTip(tr("Call audio level"));
+    topRow->addWidget(micBadge_);
+    topRow->addWidget(remoteBadge_);
     topRow->addStretch();
     auto *refresh = new QPushButton(tr("Refresh"));
     refresh->setProperty("variant", "ghost");
+    refresh->setIcon(UiKit::icon("rotate-cw"));
     topRow->addWidget(refresh);
     auto *toggle = new QPushButton(tr("Settings"));
     toggle->setProperty("variant", "ghost");
+    toggle->setIcon(UiKit::icon("cog"));
     toggle->setCheckable(true);
     toggle->setChecked(false);
     topRow->addWidget(toggle);
@@ -123,7 +139,7 @@ void MeetingWindow::buildUi() {
     form->addRow(tr("My microphone"), micBox_);
     form->addRow(tr("Call audio"), callBox_);
     form->addRow(tr("Meeting language"), languageBox_);
-    form->addRow(QString(), diarize_);
+    form->addRow(tr("Speakers"), diarize_);
     settingsBox->setVisible(false);
     body->addWidget(settingsBox);
     connect(toggle, &QPushButton::toggled, this, [this, settingsBox](bool open) {
@@ -142,6 +158,7 @@ void MeetingWindow::buildUi() {
     auto *actions = new QHBoxLayout;
     startButton_ = new QPushButton(tr("Start"));
     startButton_->setObjectName(QStringLiteral("primary"));
+    startButton_->setIcon(UiKit::icon("play"));
     saveButton_ = new QPushButton(tr("Save transcript…"));
     saveButton_->setProperty("variant", "ghost");
     saveButton_->setIcon(UiKit::icon("folder"));
@@ -273,7 +290,13 @@ void MeetingWindow::renameSpeaker(const QString &speaker) {
 
 void MeetingWindow::setRunning(bool running) {
     running_ = running;
+    emit recordingChanged(running);
     startButton_->setText(running ? tr("Stop") : tr("Start"));
+    startButton_->setIcon(UiKit::icon(running ? "stop" : "play"));
+    if (!running) {
+        micBadge_->reset();
+        remoteBadge_->reset();
+    }
     micBox_->setEnabled(!running);
     callBox_->setEnabled(!running);
     languageBox_->setEnabled(!running);

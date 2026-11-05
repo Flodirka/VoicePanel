@@ -180,7 +180,7 @@ void MainWindow::buildUi() {
     expandButton_ = new QPushButton(tr("Preview"));
     expandButton_->setObjectName("previewButton");
     expandButton_->setProperty("variant", "ghost");
-    expandButton_->setIcon(UiKit::icon("text-box"));
+    expandButton_->setIcon(UiKit::icon("eye"));
     expandButton_->setToolTip(tr("Open or collapse transcript preview"));
     connect(expandButton_, &QPushButton::clicked, this, [this]() {
         expanded_ ? showCompact() : showExpanded();
@@ -307,6 +307,7 @@ void MainWindow::buildUi() {
     translateButton_ = new QPushButton(tr("Translate"));
     translateButton_->setObjectName("translateText");
     translateButton_->setProperty("variant", "ghost");
+    translateButton_->setIcon(UiKit::icon("arrow-right-left"));
     translateButton_->setToolTip(tr("Translate reviewed text: Russian to English or English to Russian"));
     connect(translateButton_, &QPushButton::clicked, this, &MainWindow::translateResult);
     previewHeader->addWidget(translateButton_);
@@ -399,8 +400,10 @@ void MainWindow::buildUi() {
     review->addWidget(changeLabel_, 1);
     acceptButton_ = new QPushButton(tr("Accept"));
     acceptButton_->setObjectName("acceptCorrection");
+    acceptButton_->setIcon(UiKit::icon("check"));
     rejectButton_ = new QPushButton(tr("Reject"));
     rejectButton_->setObjectName("rejectCorrection");
+    rejectButton_->setIcon(UiKit::icon("undo-2"));
     acceptButton_->setProperty("variant", "outline");
     rejectButton_->setProperty("variant", "ghost");
     acceptButton_->setToolTip(tr("Accept all current corrections"));
@@ -425,6 +428,7 @@ void MainWindow::buildUi() {
     historyButton_ = new QPushButton(tr("History"));
     historyButton_->setObjectName("transcriptHistory");
     historyButton_->setProperty("variant", "ghost");
+    historyButton_->setIcon(UiKit::icon("history"));
     historyButton_->setToolTip(tr("Restore a previous transcript, including text that could not be inserted or saved"));
     connect(historyButton_, &QPushButton::clicked, this, [this]() {
         QMenu menu(historyButton_);
@@ -439,10 +443,12 @@ void MainWindow::buildUi() {
     actions->addStretch();
     copyButton_ = new QPushButton(tr("Copy"));
     copyButton_->setProperty("variant", "outline");
+    copyButton_->setIcon(UiKit::icon("clipboard"));
     connect(copyButton_, &QPushButton::clicked, this, &MainWindow::copyResult);
     actions->addWidget(copyButton_);
     insertButton_ = new QPushButton(tr("Insert"));
     insertButton_->setProperty("variant", "primary");
+    insertButton_->setIcon(UiKit::icon("corner-down-left"));
     insertButton_->setToolTip(tr("Insert into the remembered field without submitting."));
     connect(insertButton_, &QPushButton::clicked, this, [this]() { insertResult(); });
     actions->addWidget(insertButton_);
@@ -811,10 +817,22 @@ void MainWindow::updateActions() {
     rejectButton_->setEnabled(!finishing_ && !corrections_.isEmpty());
 }
 
+void MainWindow::setLiveRecording(bool recording) {
+    if (liveRecording_ == recording) return;
+    liveRecording_ = recording;
+    updateMicrophone();
+    updateActions();
+}
+
 void MainWindow::updateMicrophone(double rms) {
+    // A live session records the microphone too, so the badge shows capture
+    // truth even when dictation itself is idle.
+    const bool capturing = recording_ || liveRecording_;
     const double level = recording_ ? AudioMeter::normalized(rms) : 0;
-    microphoneLevel_ = recording_ ? microphoneLevel_ * 0.5 + level * 0.5 : 0;
-    micButton_->setIcon(UiKit::microphoneIcon(microphoneLevel_, recording_));
+    microphoneLevel_ = capturing ? microphoneLevel_ * 0.5 + level * 0.5 : 0;
+    micButton_->setIcon(UiKit::microphoneIcon(microphoneLevel_, capturing));
+    micButton_->setToolTip(capturing && !recording_
+        ? tr("Recording a live session") : micButton_->toolTip());
 }
 
 void MainWindow::finishSession() {
