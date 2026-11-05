@@ -48,9 +48,25 @@ for line in sys.stdin:
 def make_backend(tmp_path: Path, emit: int = 1, **overrides) -> OmnivoiceBackend:
     script = tmp_path / "fake_engine.py"
     script.write_text(FAKE_ENGINE, encoding="utf-8")
-    # Windows cannot exec a text file as an .exe; a .bat wrapper does the job.
-    engine = tmp_path / "omnivoice-tts.bat"
-    engine.write_text(f'@echo off\n"{sys.executable}" "{script}" --emit {emit} %*\n', encoding="utf-8")
+    # The engine binary is launched directly, so the fake needs an executable
+    # shim per platform: Windows cannot exec a text file as an .exe (a .bat
+    # wrapper works), POSIX runs a shebang script after chmod +x.
+    if sys.platform == "win32":
+        engine = tmp_path / "omnivoice-tts.bat"
+        engine.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" --emit {emit} %*\r\n',
+            encoding="utf-8",
+        )
+    else:
+        engine = tmp_path / "omnivoice-tts"
+        engine.write_text(
+            f"#!{sys.executable}\n"
+            "import runpy, sys\n"
+            f"sys.argv = [sys.argv[0], '--emit', '{emit}'] + sys.argv[1:]\n"
+            f"runpy.run_path({str(script)!r}, run_name='__main__')\n",
+            encoding="utf-8",
+        )
+        engine.chmod(0o755)
     codec = tmp_path / "omnivoice-codec.exe"
     codec.write_text("", encoding="utf-8")
     models_dir = tmp_path / "models"
