@@ -136,7 +136,14 @@ computed by the `nemotron-diar` model:
 ```
 
 Offsets are samples at the file's rate. The meeting view in the panel uses
-this endpoint; other clients can call it directly.
+this endpoint to label remote speakers; other clients can call it directly.
+
+The meeting window keeps two tabs — free-form **Notes** and the live
+**Transcript** — and on stop saves one Markdown document named after the
+meeting's full start time (`Meeting 2026-11-06 00-54-33.md`) into the
+configured folder (default `Documents\VoicePanel\Meetings`): the Notes
+section first, the Transcript section second. Auto-save is a setting in
+the meeting's popover.
 
 ## Errors
 
