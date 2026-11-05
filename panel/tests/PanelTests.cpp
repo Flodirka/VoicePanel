@@ -1599,14 +1599,17 @@ private slots:
     }
 
     void sessionWindowOpensInBothModes() {
-        // Reproduces the crash report: opening either live mode.
+        // Reproduces the crash report: opening either live mode. The
+        // interpreter shows both halves; subtitles reuses the call pane alone.
         SessionWindow window(app_);
-        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveHeard")));
-        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveTranslated")));
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveRemote")));
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveMine")));
         window.openMode(SessionWindow::Mode::Interpreter);
         QCOMPARE(window.isVisible(), true);
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveMine"))->isVisible());
         window.openMode(SessionWindow::Mode::Subtitles);
-        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveHeard"))->isVisible());
+        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveRemote"))->isVisible());
+        QVERIFY(!window.findChild<QTextEdit *>(QStringLiteral("liveMine"))->isVisible());
         window.hide();
     }
 

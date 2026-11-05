@@ -2,10 +2,9 @@
 #include <QDialog>
 
 class QComboBox;
-class QFormLayout;
+class QFrame;
 class QLabel;
 class QPushButton;
-class QSplitter;
 class QTextEdit;
 
 namespace VoicePanel {
@@ -13,13 +12,18 @@ namespace VoicePanel {
 class LevelBadge;
 class PanelApp;
 class SessionController;
+class SettingsPopover;
 
-// The live surface. It borrows the preview editor's layout — one frameless
-// "editorPage" frame, muted column captions, plain-text panes and a bottom
-// action row — so the two windows read as one application.
+// The live surface, two modes: the interpreter (speak both ways) and
+// subtitles (listen only).
 //
-// Settings are collapsed by default: an interpreter wants to see the two
-// columns, not eight combos.
+// The interpreter reads as the mobile translate-conversation design the user
+// approved: the window splits into two equal halves — the call on the left,
+// the microphone on the right — divided by a hairline with a swap button.
+// Each half is headed by its animated level badge (the speaker glyph for call
+// audio, the microphone for the user), and each utterance lands as a caption
+// block: the heard line muted under a side-coloured marker, the translation
+// below it. Settings live in a popover, not in a permanently visible form.
 class SessionWindow : public QDialog {
     Q_OBJECT
 public:
@@ -38,6 +42,7 @@ signals:
 
 private:
     void buildUi();
+    void buildSettings();
     void refreshDevices();
     void refreshVoices();
     void applySettings();
@@ -45,17 +50,17 @@ private:
     void setRunning(bool running);
     void updateExplanation();
     void updateCableHint();
-    void appendHeard(const QString &text);
-    void appendTranslated(const QString &text);
-    void appendLine(const QString &text);
+    void appendRemote(const QString &heard, const QString &translated);
+    void appendMine(const QString &said, const QString &voiced);
+    void clearPanes();
     QString settingsSafeName() const;
 
     PanelApp *app_ = nullptr;
     SessionController *controller_ = nullptr;
     Mode mode_ = Mode::Interpreter;
 
-    QPushButton *settingsToggle_ = nullptr;
-    QWidget *settingsBox_ = nullptr;
+    SettingsPopover *settings_ = nullptr;
+    QPushButton *settingsButton_ = nullptr;
     QPushButton *tabInterpreter_ = nullptr;
     QPushButton *tabMeeting_ = nullptr;
     QComboBox *micBox_ = nullptr;
@@ -66,20 +71,17 @@ private:
     QComboBox *callLanguageBox_ = nullptr;
     QPushButton *previewButton_ = nullptr;
     QPushButton *startButton_ = nullptr;
-    QPushButton *closeButton_ = nullptr;
     QPushButton *refreshButton_ = nullptr;
+    QPushButton *swapButton_ = nullptr;
     LevelBadge *micBadge_ = nullptr;
     LevelBadge *remoteBadge_ = nullptr;
-    QFormLayout *settingsForm_ = nullptr;
     QLabel *cableHint_ = nullptr;
     QLabel *statusLabel_ = nullptr;
-    QLabel *titleLabel_ = nullptr;
-    QLabel *heardLabel_ = nullptr;
-    QLabel *translatedLabel_ = nullptr;
-    QSplitter *columns_ = nullptr;
-    QWidget *translatedPane_ = nullptr;
-    QTextEdit *heardEdit_ = nullptr;
-    QTextEdit *translatedEdit_ = nullptr;
+    QFrame *sideDivider_ = nullptr;
+    QWidget *interpreterBody_ = nullptr;
+    QWidget *mineBox_ = nullptr;
+    QTextEdit *remoteEdit_ = nullptr;     // the call half (interpreter) / captions (subtitles)
+    QTextEdit *mineEdit_ = nullptr;       // the microphone half
 
     bool running_ = false;
     int previousOutputDevice_ = -1;

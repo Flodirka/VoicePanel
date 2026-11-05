@@ -1,5 +1,6 @@
 #include "app/MeetingWindow.h"
 #include "app/PanelApp.h"
+#include "app/SettingsPopover.h"
 #include "app/UiKit.h"
 #include "audio/WasapiCapture.h"
 #include "core/AudioMeter.h"
@@ -10,12 +11,15 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
+#include <QStandardPaths>
 #include <QTextEdit>
 #include <QInputDialog>
 #include <QMenu>
@@ -30,6 +34,10 @@ QString clock(double seconds) {
     return QStringLiteral("%1:%2").arg(total / 60, 2, 10, QLatin1Char('0'))
         .arg(total % 60, 2, 10, QLatin1Char('0'));
 }
+QString fileNameStamp(const QDateTime &at) {
+    // Windows-safe (no colons), sorts by date, carries the full start time.
+    return at.toString(QStringLiteral("yyyy-MM-dd HH-mm-ss"));
+}
 } // namespace
 
 MeetingWindow::MeetingWindow(PanelApp *app, QWidget *parent) : QDialog(parent), app_(app) {
@@ -39,6 +47,7 @@ MeetingWindow::MeetingWindow(PanelApp *app, QWidget *parent) : QDialog(parent), 
     resize(720, 560);
     controller_ = new SessionController(app_->service(), app_->tts(), this);
     buildUi();
+    buildSettings();
     refreshDevices();
 
     connect(controller_, &SessionController::line, this,
@@ -88,74 +97,87 @@ MeetingWindow::~MeetingWindow() { stopRecording(); }
 
 void MeetingWindow::buildUi() {
     auto *body = new QVBoxLayout(this);
-    body->setContentsMargins(24, 20, 24, 20);
-    body->setSpacing(12);
+    body->setContentsMargins(16, 12, 16, 14);
+    body->setSpacing(8);
 
-    // Settings are collapsed by default, as in the live window: the transcript
-    // is what a meeting needs on screen, not six device rows.
-    auto *topRow = new QHBoxLayout;
-    // Two animated state badges next to the buttons: the microphone fills
-    // while it records, the speaker glyph reacts to call audio. Unlike the
-    // old bar meters they decay on their own timer, so a silent loopback
-    // never leaves a frozen bar behind.
+    // Header: the two animated state badges, then refresh and the settings
+    // popover button. No device rows on screen — a meeting needs the
+    // transcript, the knobs live one click away.
+    auto *head = new QHBoxLayout;
+    head->setSpacing(6);
     micBadge_ = new LevelBadge(LevelBadge::Kind::Microphone);
     micBadge_->setObjectName(QStringLiteral("micLevelBadge"));
     micBadge_->setToolTip(tr("Microphone level"));
     remoteBadge_ = new LevelBadge(LevelBadge::Kind::Remote);
     remoteBadge_->setObjectName(QStringLiteral("remoteLevelBadge"));
     remoteBadge_->setToolTip(tr("Call audio level"));
-    topRow->addWidget(micBadge_);
-    topRow->addWidget(remoteBadge_);
-    topRow->addStretch();
-    auto *refresh = new QPushButton(tr("Refresh"));
+    head->addWidget(micBadge_);
+    head->addWidget(remoteBadge_);
+    head->addStretch();
+    auto *refresh = new QPushButton;
     refresh->setProperty("variant", "ghost");
+    refresh->setProperty("size", "icon");
     refresh->setIcon(UiKit::icon("rotate-cw"));
-    topRow->addWidget(refresh);
-    auto *toggle = new QPushButton(tr("Settings"));
-    toggle->setProperty("variant", "ghost");
-    toggle->setIcon(UiKit::icon("cog"));
-    toggle->setCheckable(true);
-    toggle->setChecked(false);
-    topRow->addWidget(toggle);
-    body->addLayout(topRow);
-
-    auto *settingsBox = new QWidget;
-    auto *form = new QFormLayout(settingsBox);
-    form->setContentsMargins(0, 0, 0, 0);
-    form->setHorizontalSpacing(12);
-    form->setVerticalSpacing(8);
-    micBox_ = new QComboBox;
-    callBox_ = new QComboBox;
-    languageBox_ = new QComboBox;
-    languageBox_->addItem(tr("Mixed / auto"), int(0));
-    languageBox_->addItem(tr("Russian"), int(1));
-    languageBox_->addItem(tr("English"), int(2));
-    languageBox_->setCurrentIndex(languageBox_->findData(app_->settings()->meetingLanguage));
-    diarize_ = new QCheckBox(tr("Separate remote speakers"));
-    diarize_->setToolTip(tr("Labels remote speech with a separate diariser, so it works in any\n"
-                           "language; the words still come from the recogniser for the meeting\n"
-                           "language. Names can be changed from the transcript's context menu."));
-    diarize_->setChecked(app_->settings()->meetingDiarize);
-    form->addRow(tr("My microphone"), micBox_);
-    form->addRow(tr("Call audio"), callBox_);
-    form->addRow(tr("Meeting language"), languageBox_);
-    form->addRow(tr("Speakers"), diarize_);
-    settingsBox->setVisible(false);
-    body->addWidget(settingsBox);
-    connect(toggle, &QPushButton::toggled, this, [this, settingsBox](bool open) {
-        settingsBox->setVisible(open);
-        adjustSize();
-    });
+    refresh->setFixedSize(30, 30);
+    refresh->setIconSize(QSize(16, 16));
+    refresh->setToolTip(tr("Refresh devices"));
     connect(refresh, &QPushButton::clicked, this, [this] { refreshDevices(); });
+    head->addWidget(refresh);
+    settingsButton_ = new QPushButton;
+    settingsButton_->setProperty("variant", "ghost");
+    settingsButton_->setProperty("size", "icon");
+    settingsButton_->setIcon(UiKit::icon("cog"));
+    settingsButton_->setFixedSize(30, 30);
+    settingsButton_->setIconSize(QSize(16, 16));
+    settingsButton_->setToolTip(tr("Meeting settings"));
+    head->addWidget(settingsButton_);
+    body->addLayout(head);
 
+    // Tabs: free-form notes first, live transcript second — the same order
+    // the saved document keeps.
+    auto *tabs = new QHBoxLayout;
+    tabs->setSpacing(6);
+    tabNotes_ = new QPushButton(tr("Notes"));
+    tabTranscript_ = new QPushButton(tr("Transcript"));
+    for (QPushButton *tab : {tabNotes_, tabTranscript_}) {
+        tab->setCheckable(true);
+        tab->setProperty("variant", "ghost");
+        tabs->addWidget(tab);
+    }
+    tabs->addStretch();
+    body->addLayout(tabs);
+
+    notes_ = new QTextEdit;
+    notes_->setObjectName(QStringLiteral("meetingNotes"));
+    notes_->setAcceptRichText(false);
+    notes_->setPlaceholderText(tr("Type your meeting notes here — they are saved into the same document, above the transcript."));
     transcript_ = new QTextEdit;
+    transcript_->setObjectName(QStringLiteral("meetingTranscript"));
     transcript_->setReadOnly(true);
     transcript_->setAcceptRichText(false);
-    transcript_->setMinimumHeight(240);
     transcript_->setPlaceholderText(tr("Lines appear here with a timestamp and a speaker."));
+
+    body->addWidget(notes_, 1);
     body->addWidget(transcript_, 1);
 
+    connect(tabNotes_, &QPushButton::clicked, this, [this] {
+        tabNotes_->setChecked(true);
+        tabTranscript_->setChecked(false);
+        notes_->setVisible(true);
+        transcript_->setVisible(false);
+    });
+    connect(tabTranscript_, &QPushButton::clicked, this, [this] {
+        tabTranscript_->setChecked(true);
+        tabNotes_->setChecked(false);
+        transcript_->setVisible(true);
+        notes_->setVisible(false);
+    });
+    tabTranscript_->setChecked(true);
+    notes_->setVisible(false);
+
+    // Footer: start/stop and the manual save; the status explains auto-save.
     auto *actions = new QHBoxLayout;
+    actions->setSpacing(8);
     startButton_ = new QPushButton(tr("Start"));
     startButton_->setObjectName(QStringLiteral("primary"));
     startButton_->setIcon(UiKit::icon("play"));
@@ -179,28 +201,84 @@ void MeetingWindow::buildUi() {
         }
     });
     connect(saveButton_, &QPushButton::clicked, this, [this] {
-        const QString text = transcriptText();
+        const QString text = documentText();
         if (text.isEmpty()) return;
+        const QString suggested = defaultFolder() + QStringLiteral("/Meeting %1.md").arg(fileNameStamp(sessionStartedAt_));
         const QString path = QFileDialog::getSaveFileName(this, tr("Save transcript"),
-                                                          settingsSafeName(),
-                                                          tr("Markdown (*.md);;Text (*.txt)"));
+            suggested, tr("Markdown (*.md)"));
         if (path.isEmpty()) return;
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            statusLabel_->setText(tr("Cannot write %1").arg(path));
-            return;
+        QFile out(path);
+        if (out.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            out.write(text.toUtf8());
+            statusLabel_->setText(tr("Saved to %1").arg(path));
         }
-        QTextStream out(&file);
-        out << "# VoicePanel meeting\n\n" << text;
-        statusLabel_->setText(tr("Saved %1").arg(path));
     });
-
     UiKit::wrapDialog(*this, windowTitle());
 }
 
-QString MeetingWindow::settingsSafeName() const {
-    return QStringLiteral("meeting-%1.md")
-        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmm")));
+void MeetingWindow::buildSettings() {
+    settings_ = new SettingsPopover(settingsButton_, tr("Meeting settings"));
+    auto *form = settings_->form();
+
+    micBox_ = new QComboBox;
+    callBox_ = new QComboBox;
+    form->addRow(tr("My microphone"), micBox_);
+    form->addRow(tr("Call audio"), callBox_);
+
+    languageBox_ = new QComboBox;
+    languageBox_->addItem(tr("Mixed / auto"), int(0));
+    languageBox_->addItem(tr("Russian"), int(1));
+    languageBox_->addItem(tr("English"), int(2));
+    form->addRow(tr("Meeting language"), languageBox_);
+
+    diarize_ = new QCheckBox(tr("Separate remote speakers"));
+    diarize_->setToolTip(tr("Labels remote speech with a separate diariser, so it works in any\n"
+                           "language; the words still come from the recogniser for the meeting\n"
+                           "language. Names can be changed from the transcript's context menu."));
+    form->addRow(tr("Speakers"), diarize_);
+
+    autoSave_ = new QCheckBox(tr("Auto-save on stop"));
+    autoSave_->setChecked(app_->settings()->meetingAutoSave);
+    form->addRow(tr("Saving"), autoSave_);
+
+    auto *folderRow = new QHBoxLayout;
+    folderRow->setSpacing(8);
+    folderLabel_ = new QLabel;
+    folderLabel_->setProperty("role", "muted");
+    folderLabel_->setWordWrap(true);
+    auto *choose = new QPushButton(tr("Choose…"));
+    folderRow->addWidget(choose, 0);
+    folderRow->addWidget(folderLabel_, 1);
+    settings_->column()->addLayout(folderRow);
+
+    const auto updateFolderLabel = [this] {
+        folderLabel_->setText(defaultFolder()
+            + QStringLiteral("\n«Meeting %1.md»").arg(
+                fileNameStamp(sessionStartedAt_.isValid() ? sessionStartedAt_ : QDateTime::currentDateTime())));
+    };
+    updateFolderLabel();
+
+    connect(choose, &QPushButton::clicked, this, [this, updateFolderLabel] {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Transcripts folder"),
+                                                              defaultFolder());
+        if (dir.isEmpty()) return;
+        app_->settings()->meetingTranscriptDir = dir;
+        app_->settings()->save();
+        updateFolderLabel();
+    });
+    connect(autoSave_, &QCheckBox::toggled, this, [this](bool on) {
+        app_->settings()->meetingAutoSave = on;
+        app_->settings()->save();
+    });
+    connect(settingsButton_, &QPushButton::clicked, this, [this] { settings_->openAt(); });
+}
+
+QString MeetingWindow::defaultFolder() const {
+    const QString configured = app_->settings()->meetingTranscriptDir;
+    return configured.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+              + QStringLiteral("/VoicePanel/Meetings")
+        : configured;
 }
 
 void MeetingWindow::refreshDevices() {
@@ -218,6 +296,9 @@ void MeetingWindow::refreshDevices() {
     const QString wanted = s->systemAudioDevice.isEmpty() ? QStringLiteral("dev:")
                                                           : QStringLiteral("dev:") + s->systemAudioDevice;
     if (int i = callBox_->findData(wanted); i >= 0) callBox_->setCurrentIndex(i);
+    languageBox_->setCurrentIndex(languageBox_->findData(s->meetingLanguage));
+    diarize_->setChecked(s->meetingDiarize);
+    autoSave_->setChecked(s->meetingAutoSave);
 }
 
 void MeetingWindow::applySettings() {
@@ -227,7 +308,6 @@ void MeetingWindow::applySettings() {
     s->systemAudioDevice = call.startsWith(QLatin1String("dev:")) ? call.mid(4) : call;
     s->meetingLanguage = languageBox_->currentData().toInt();
     s->meetingDiarize = diarize_->isChecked();
-    s->meetingModel = QStringLiteral("nemotron-diar");
     s->save();
 }
 
@@ -235,12 +315,13 @@ void MeetingWindow::startRecording() {
     applySettings();
     transcript_->clear();
     lines_.clear();
+    sessionStartedAt_ = QDateTime::currentDateTime();
     controller_->configure(*app_->settings(), SessionController::Mode::Meeting);
     QString vadPath = app_->vadPath();
     if (vadPath.isEmpty()) vadPath = app_->settings()->vadModel;
     if (vadPath.isEmpty()) vadPath = QStringLiteral("models/silero_vad.onnx");
     if (!controller_->start(vadPath)) {
-        statusLabel_->setText(tr("Could not start capture — check the devices above."));
+        statusLabel_->setText(tr("Could not start capture — check the devices in Settings."));
         return;
     }
     setRunning(true);
@@ -250,6 +331,21 @@ void MeetingWindow::stopRecording() {
     if (!running_) return;
     controller_->stop();
     setRunning(false);
+    // Auto-save: one Markdown document per meeting, Notes section first,
+    // Transcript second, named after the full start time.
+    if (!app_->settings()->meetingAutoSave || lines_.isEmpty()) return;
+    const QString text = documentText();
+    if (text.isEmpty()) return;
+    QDir().mkpath(defaultFolder());
+    const QString path = defaultFolder()
+        + QStringLiteral("/Meeting %1.md").arg(fileNameStamp(sessionStartedAt_));
+    QFile out(path);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        out.write(text.toUtf8());
+        statusLabel_->setText(tr("Saved to %1").arg(path));
+    } else {
+        statusLabel_->setText(tr("Auto-save failed for %1").arg(path));
+    }
 }
 
 void MeetingWindow::appendLine(const QString &speaker, const QString &text, double at) {
@@ -265,6 +361,22 @@ QString MeetingWindow::transcriptText() const {
                    .arg(clock(line.at), names_.value(line.speaker, line.speaker), line.text);
     }
     return out;
+}
+
+QString MeetingWindow::documentText() const {
+    const QString stamp = sessionStartedAt_.isValid()
+        ? sessionStartedAt_.toString(QStringLiteral("yyyy-MM-dd HH:mm"))
+        : QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+    QString doc = QStringLiteral("# Meeting — %1\n").arg(stamp);
+    const QString notes = notes_->toPlainText().trimmed();
+    if (!notes.isEmpty()) {
+        doc += QStringLiteral("\n## Notes\n%1\n").arg(notes);
+    }
+    const QString transcript = transcriptText();
+    if (!transcript.isEmpty()) {
+        doc += QStringLiteral("\n## Transcript\n%1").arg(transcript);
+    }
+    return doc;
 }
 
 void MeetingWindow::rebuildTranscript() {

@@ -25,6 +25,10 @@ void Settings::load() {
     asrModel = s.value("asrModel", asrModel).toString();
     meetingModel = QStringLiteral("nemotron-diar");
     meetingDiarize = s.value("meetingDiarize", meetingDiarize).toBool();
+    meetingAutoSave = s.value("meetingAutoSave", meetingAutoSave).toBool();
+    meetingTranscriptDir = s.value("meetingTranscriptDir", meetingTranscriptDir).toString();
+    subtitlesDisplay = s.value("subtitlesDisplay", subtitlesDisplay).toInt();
+    subtitlesTextSize = s.value("subtitlesTextSize", subtitlesTextSize).toInt();
     meetingLanguage = s.value("meetingLanguage", meetingLanguage).toInt();
     liveOutgoing = s.value("liveOutgoing", liveOutgoing).toInt();
     callLanguage = s.value("callLanguage", callLanguage).toInt();
@@ -85,6 +89,10 @@ void Settings::save() const {
     s.setValue("asrModel", asrModel);
     s.setValue("meetingModel", meetingModel);
     s.setValue("meetingDiarize", meetingDiarize);
+    s.setValue("meetingAutoSave", meetingAutoSave);
+    s.setValue("meetingTranscriptDir", meetingTranscriptDir);
+    s.setValue("subtitlesDisplay", subtitlesDisplay);
+    s.setValue("subtitlesTextSize", subtitlesTextSize);
     s.setValue("meetingLanguage", meetingLanguage);
     s.setValue("liveOutgoing", liveOutgoing);
     s.setValue("callLanguage", callLanguage);

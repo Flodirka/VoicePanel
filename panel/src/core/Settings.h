@@ -17,6 +17,10 @@ struct Settings {
     QString asrModel = "nemotron";     // nemotron everywhere; qwen3-asr | parakeet switchable
     QString meetingModel = "nemotron-diar";  // task: diar, independent of ASR
     bool meetingDiarize = true;        // label remote speakers when available
+    bool meetingAutoSave = true;       // write the transcript on stop, as .md
+    QString meetingTranscriptDir;      // empty -> Documents/VoicePanel/Meetings
+    int subtitlesDisplay = 0;          // 0 = transcript+translation, 1 = translation, 2 = transcript
+    int subtitlesTextSize = 1;         // 0 = S, 1 = M, 2 = L
     int meetingLanguage = 0;           // 0 auto/mixed | 1 Russian | 2 English
     int liveOutgoing = 0;              // 0 translated | 1 verbatim | 2 captions only
     int callLanguage = 0;              // 0 the other side speaks English | 1 Russian

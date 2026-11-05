@@ -4,10 +4,12 @@
 
 namespace VoicePanel {
 class LevelBadge;
+class SettingsPopover;
 }
 
 class QCheckBox;
 class QComboBox;
+class QFrame;
 class QLabel;
 class QPushButton;
 
@@ -16,11 +18,11 @@ namespace VoicePanel {
 class PanelApp;
 class SessionController;
 
-// A small always-on-top strip that captions one application's audio.
-//
-// Every choice is visible: the source, the direction and whether the
-// translation is spoken. A right-click menu alone hid all of that, and a
-// transparent background lost the text over bright video.
+// A minimal always-on-top caption strip, modelled on the mobile AI-subtitles
+// designs: a compact toolbar (settings, direction, mic state, close) and a
+// caption card — the heard line above a hairline, the translation below.
+// Every knob lives in the settings popover (audio source, what to show,
+// text size, voice), so the strip itself stays as small as the caption.
 class CaptionOverlay : public QWidget {
     Q_OBJECT
 public:
@@ -44,18 +46,28 @@ signals:
     void recordingChanged(bool recording);
 
 private:
+    struct TextSizes { int heard; int translated; };
+    TextSizes textSizes() const;
     void buildUi();
+    void buildSettings();
     void refreshSources();
     void restart();
     void applySettings();
+    void applyDisplayMode();     // what to show: both / translation / transcript
+    void applyTextSize();        // S / M / L pixel sizes
 
     PanelApp *app_ = nullptr;
     SessionController *controller_ = nullptr;
     QComboBox *source_ = nullptr;
     QComboBox *direction_ = nullptr;
+    QComboBox *display_ = nullptr;
+    QComboBox *size_ = nullptr;
     QCheckBox *voice_ = nullptr;
+    SettingsPopover *settings_ = nullptr;
+    QPushButton *settingsButton_ = nullptr;
     LevelBadge *micBadge_ = nullptr;
     QPushButton *close_ = nullptr;
+    QFrame *divider_ = nullptr;
     QLabel *heard_ = nullptr;
     QLabel *translated_ = nullptr;
 

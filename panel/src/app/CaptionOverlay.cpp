@@ -1,5 +1,6 @@
 #include "app/CaptionOverlay.h"
 #include "app/PanelApp.h"
+#include "app/SettingsPopover.h"
 #include "app/UiKit.h"
 #include "audio/WasapiCapture.h"
 #include "core/LevelBadge.h"
@@ -9,6 +10,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -30,7 +32,7 @@ CaptionOverlay::CaptionOverlay(PanelApp *app, QWidget *parent)
     setObjectName(QStringLiteral("captionOverlay"));
     setWindowIcon(UiKit::icon("mic"));
     setWindowTitle(tr("VoicePanel — subtitles"));
-    resize(900, 168);
+    resize(560, 150);
 
     controller_ = new SessionController(app_->service(), app_->tts(), this);
     connect(controller_, &SessionController::caption, this,
@@ -42,37 +44,45 @@ CaptionOverlay::CaptionOverlay(PanelApp *app, QWidget *parent)
             [this](const QString &message) { translated_->setText(message); });
 
     buildUi();
+    buildSettings();
     refreshSources();
+    applyDisplayMode();
+    applyTextSize();
 }
 
 CaptionOverlay::~CaptionOverlay() { end(); }
 
 void CaptionOverlay::buildUi() {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 12, 16, 16);
-    layout->setSpacing(8);
+    layout->setContentsMargins(10, 8, 10, 10);
+    layout->setSpacing(0);
 
-    // Visible controls: source, direction, voice. No hidden right-click menu.
+    // Compact toolbar: settings, direction, then state and close. Everything
+    // else lives in the popover, so the strip stays caption-sized.
     auto *row = new QHBoxLayout;
-    row->setSpacing(8);
-    source_ = new QComboBox;
-    source_->setMinimumWidth(220);
-    source_->setToolTip(tr("Which audio is captioned: an application, or the whole output"));
-    row->addWidget(source_);
+    row->setSpacing(6);
+    auto *settingsButton = new QPushButton;
+    settingsButton->setProperty("variant", "ghost");
+    settingsButton->setProperty("size", "icon");
+    settingsButton->setIcon(UiKit::icon("cog"));
+    settingsButton->setFixedSize(28, 28);
+    settingsButton->setIconSize(QSize(16, 16));
+    settingsButton->setToolTip(tr("Subtitles settings"));
+    row->addWidget(settingsButton);
+
     direction_ = new QComboBox;
     direction_->addItem(tr("English → Russian"), int(0));
     direction_->addItem(tr("Russian → English"), int(1));
+    direction_->setToolTip(tr("Direction"));
     row->addWidget(direction_);
-    voice_ = new QCheckBox(tr("Voice"));
-    voice_->setToolTip(tr("Speak the translation with the cloned voice"));
-    row->addWidget(voice_);
+
     row->addStretch();
-    // Live state: the microphone glyph fills while captioning runs, so an
-    // always-on-top overlay is visibly "recording", not just visible.
+
     micBadge_ = new LevelBadge(LevelBadge::Kind::Microphone);
     micBadge_->setObjectName(QStringLiteral("captionMicBadge"));
     micBadge_->setToolTip(tr("Captioning"));
     row->addWidget(micBadge_);
+
     close_ = new QPushButton;
     close_->setProperty("variant", "ghost");
     close_->setProperty("size", "icon");
@@ -82,49 +92,95 @@ void CaptionOverlay::buildUi() {
     close_->setToolTip(tr("Stop captioning (Esc)"));
     row->addWidget(close_);
     layout->addLayout(row);
+    settingsButton_ = settingsButton;
 
-    heard_ = new QLabel(tr("Choose an application above, then play the video."));
+    // Caption card: the heard line muted, a hairline, the translation large —
+    // the mobile-subtitles layout the design was approved against.
+    auto *card = new QVBoxLayout;
+    card->setContentsMargins(14, 2, 14, 4);
+    card->setSpacing(0);
+    heard_ = new QLabel(tr("Choose a source in settings, then play the audio."));
     heard_->setObjectName(QStringLiteral("captionHeard"));
     heard_->setWordWrap(true);
-    QFont small = heard_->font();
-    small.setPixelSize(13);
-    heard_->setFont(small);
-    // A long source line must not push the translation off the card.
-    heard_->setMaximumHeight(36);
-    layout->addWidget(heard_);
+    heard_->setMaximumHeight(44);
+    card->addWidget(heard_);
+
+    divider_ = new QFrame;
+    divider_->setFrameShape(QFrame::HLine);
+    divider_->setFrameShadow(QFrame::Plain);
+    divider_->setFixedHeight(1);
+    divider_->setStyleSheet(QStringLiteral("background: rgba(250, 241, 204, 0.16);"));
+    card->addWidget(divider_);
 
     translated_ = new QLabel(QString());
     translated_->setObjectName(QStringLiteral("captionTranslated"));
     translated_->setWordWrap(true);
     translated_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    QFont big = translated_->font();
-    big.setPixelSize(23);
-    big.setWeight(QFont::DemiBold);
-    translated_->setFont(big);
-    layout->addWidget(translated_, 1);
+    translated_->setMaximumHeight(64);
+    card->addWidget(translated_);
+    layout->addLayout(card, 1);
 
-    // An opaque card: cream text over a bright video was unreadable.
     setStyleSheet(QStringLiteral(
         "#captionHeard { color: #c9bd9a; background: transparent; }"
         "#captionTranslated { color: #faf1cc; background: transparent; }"
         "#captionOverlay QComboBox { background-color: #19141f; color: #faf1cc;"
-        " border: 1px solid rgba(250, 241, 204, 0.16); border-radius: 8px; padding: 4px 8px; }"
-        "#captionOverlay QCheckBox { color: #faf1cc; background: transparent; }"
+        " border: 1px solid rgba(250, 241, 204, 0.16); border-radius: 8px; padding: 3px 8px; }"
         "#captionOverlay QLabel { color: #faf1cc; background: transparent; }"));
 
     connect(close_, &QPushButton::clicked, this, [this] {
         end();
         hide();
     });
+    connect(direction_, &QComboBox::currentIndexChanged, this, [this] {
+        if (loading_) return;
+        applySettings();
+        restart();
+    });
+}
+
+void CaptionOverlay::buildSettings() {
+    settings_ = new SettingsPopover(settingsButton_, tr("Subtitles settings"));
+    auto *form = settings_->form();
+
+    source_ = new QComboBox;
+    source_->setMinimumContentsLength(24);
+    source_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    source_->setToolTip(tr("Which audio is captioned: an application, or the whole output"));
+    form->addRow(tr("Audio source"), source_);
+
+    display_ = new QComboBox;
+    display_->addItem(tr("Transcript and translation"), int(0));
+    display_->addItem(tr("Translation only"), int(1));
+    display_->addItem(tr("Transcript only"), int(2));
+    form->addRow(tr("Show"), display_);
+
+    size_ = new QComboBox;
+    size_->addItem(tr("S"), int(0));
+    size_->addItem(tr("M"), int(1));
+    size_->addItem(tr("L"), int(2));
+    form->addRow(tr("Text size"), size_);
+
+    voice_ = new QCheckBox(tr("Speak the translation"));
+    voice_->setToolTip(tr("Speak the translation with the selected voice"));
+    form->addRow(QString(), voice_);
+
+    connect(settingsButton_, &QPushButton::clicked, this, [this] { settings_->openAt(); });
     connect(source_, &QComboBox::currentIndexChanged, this, [this] {
         if (loading_) return;
         applySettings();
         restart();
     });
-    connect(direction_, &QComboBox::currentIndexChanged, this, [this] {
+    connect(display_, &QComboBox::currentIndexChanged, this, [this] {
         if (loading_) return;
-        applySettings();
-        restart();
+        app_->settings()->subtitlesDisplay = display_->currentData().toInt();
+        app_->settings()->save();
+        applyDisplayMode();
+    });
+    connect(size_, &QComboBox::currentIndexChanged, this, [this] {
+        if (loading_) return;
+        app_->settings()->subtitlesTextSize = size_->currentData().toInt();
+        app_->settings()->save();
+        applyTextSize();
     });
     connect(voice_, &QCheckBox::toggled, this, [this](bool on) {
         if (loading_) return;
@@ -132,6 +188,44 @@ void CaptionOverlay::buildUi() {
         app_->settings()->save();
         controller_->setSpeakCaptions(on);
     });
+}
+
+void CaptionOverlay::applyDisplayMode() {
+    const int mode = app_->settings()->subtitlesDisplay;
+    // Transcript-only reads at the translation size: the caption is the main
+    // content in that mode, not a footnote.
+    const bool showHeard = mode == 0 || mode == 2;
+    const bool showTranslated = mode == 0 || mode == 1;
+    heard_->setVisible(showHeard);
+    translated_->setVisible(showTranslated);
+    divider_->setVisible(mode == 0);
+    QFont big = translated_->font();
+    big.setPixelSize(textSizes().translated);
+    big.setWeight(QFont::DemiBold);
+    if (mode == 2) heard_->setFont(big);
+    else applyTextSize();
+}
+
+void CaptionOverlay::applyTextSize() {
+    const auto sizes = textSizes();
+    QFont small = heard_->font();
+    small.setPixelSize(sizes.heard);
+    heard_->setFont(small);
+    QFont big = translated_->font();
+    big.setPixelSize(sizes.translated);
+    big.setWeight(QFont::DemiBold);
+    translated_->setFont(big);
+    // Two lines max for either line, so the strip never grows mid-video.
+    heard_->setMaximumHeight(sizes.heard * 3);
+    translated_->setMaximumHeight(sizes.translated * 3);
+}
+
+CaptionOverlay::TextSizes CaptionOverlay::textSizes() const {
+    switch (app_->settings()->subtitlesTextSize) {
+    case 0: return {12, 17};
+    case 2: return {19, 27};
+    default: return {15, 21};
+    }
 }
 
 void CaptionOverlay::refreshSources() {
@@ -162,6 +256,8 @@ void CaptionOverlay::refreshSources() {
     if (row >= 0) source_->setCurrentIndex(row);
 
     direction_->setCurrentIndex(direction_->findData(s->subtitlesLanguage));
+    display_->setCurrentIndex(display_->findData(s->subtitlesDisplay));
+    size_->setCurrentIndex(size_->findData(s->subtitlesTextSize));
     voice_->setChecked(s->speakCaptions);
     loading_ = false;
 }
@@ -196,7 +292,7 @@ void CaptionOverlay::begin() {
     if (vadPath.isEmpty()) vadPath = app_->settings()->vadModel;
     if (vadPath.isEmpty()) vadPath = QStringLiteral("models/silero_vad.onnx");
     if (!controller_->start(vadPath)) {
-        translated_->setText(tr("Could not capture that source — pick another one above."));
+        translated_->setText(tr("Could not capture that source — pick another one in settings."));
         show();
         raise();
         return;
@@ -219,8 +315,8 @@ void CaptionOverlay::end() {
 void CaptionOverlay::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(QPen(QColor(250, 241, 204, 60), 1.0));
-    painter.setBrush(QColor(17, 14, 22, 248));   // surface-0, near opaque
+    painter.setPen(QPen(QColor(250, 241, 204, 40), 1.0));
+    painter.setBrush(QColor(17, 14, 22, 238));   // surface-0, near opaque
     painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
 }
 

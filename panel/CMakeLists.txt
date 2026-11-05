@@ -30,6 +30,7 @@ set(PANEL_SOURCES
   src/app/ServiceTray.cpp
   src/app/SessionWindow.cpp
   src/app/CaptionOverlay.cpp
+  src/app/SettingsPopover.cpp
   src/app/MeetingWindow.cpp
   src/core/ServiceClient.cpp
   src/core/Settings.cpp
