@@ -55,6 +55,7 @@ _Actual Qt widgets with sample text. The toolbar and Preview remain frameless._
 - **A review editor.** Compare original and processed text, accept or reject all current corrections in one click, and make manual edits. Late results preserve your edits.
 - **Remembered-target insertion.** Reuse Windows UI Automation and clipboard paste. Insert only new text. Failed insertion does not lock recording or silence reset; History keeps earlier text and insertion progress for retry.
 - **Voice playback and profiles.** Speak typed text, save WAV audio, and record or import a reference for local voice cloning. English and Russian can use different profiles.
+- **Live sessions.** An interpreter window with the call and the microphone side by side, a meeting window with Notes and Transcript tabs, and a subtitles overlay for any application. Captions arrive in order from the microphone, the call or both, and stopping a meeting auto-saves one Markdown file.
 - **A separate service.** Use transcription, synthesis, text processing and chat endpoints without opening the panel. A server tray indicator manages the local service.
 - **Local records.** Save original text, processed text, translations and reviewed output as Markdown. Voice references and preferences stay local.
 

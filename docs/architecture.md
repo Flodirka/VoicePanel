@@ -17,6 +17,8 @@ flowchart LR
     Q -->|Review| R[Preview and confirmation]
     R --> I
     I --> A
+    L[Live windows: interpreter, meeting, subtitles] -->|WebSocket stream| S
+    S -->|ordered captions| L
 ```
 
 ## Desktop panel
@@ -31,9 +33,13 @@ Auto-save writes stable transcripts, processing results and reviewed edits indep
 
 `TtsPlayer` queues synthesis ahead of playback and can write combined speech to WAV. `MarkdownStore` writes session records. Settings and voice references stay outside the public source tree.
 
+`SessionController` owns live sessions. The interpreter window splits the call and the microphone into two halves with per-source level badges, the meeting window keeps Notes and Transcript tabs, and the subtitles overlay shows a compact caption card over any application. `WasapiCapture` captures the microphone and, on Windows 10 2004+, process loopback audio. Session state lives on the absolute session clock, so the diariser's rolling buffer cannot drift speaker labels. Stopping a meeting auto-saves one Markdown file with the Notes section first and the Transcript second; manual save prefills the same name.
+
 ## Python service
 
-`service/voiceservice/app.py` creates the FastAPI application. `api/` contains HTTP and WebSocket routes. `backends/` adapts audio.cpp, llama.cpp and whisper.cpp. `compute.py` handles persisted backend compute choices. `voices.py` stores local voice profiles.
+`service/voiceservice/app.py` creates the FastAPI application. `api/` contains HTTP and WebSocket routes. `backends/` adapts audio.cpp, llama.cpp, whisper.cpp and omnivoice.cpp. `compute.py` handles persisted compute choices per group (`main`, `llm`, `clone`, diarization). `voices.py` stores local voice profiles.
+
+Live transcription streams over `ws://…/v1/sessions/dictation`: the server rechunks binary PCM into VAD frames and returns ordered partials, finals and diarisation tags. `POST /v1/warmup` loads the ASR model if it is not resident and prefills the local text model's prompt prefix before a session starts; it never touches an external text server. A stored voice profile whose clone engine is no longer configured resolves to a served model, so older profiles keep working after a config change.
 
 The service exposes health and capability endpoints separately from inference. Backend processes and models are loaded on demand according to configuration. The default setup uses local endpoints. Configuring an external LLM changes where text and context are sent.
 
