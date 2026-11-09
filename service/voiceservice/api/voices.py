@@ -151,7 +151,7 @@ async def _synth_with_voice(
     voice library, omnivoice.cpp reads the profile's reference itself (with a
     pre-encoded .rvq cache).
     """
-    model = profile.get("model") or registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8")
+    model = registry.effective_profile_model(profile.get("model"))
     backend = registry.tts_backend(model)
     async with registry._tts_lock:
         return await backend.speech(

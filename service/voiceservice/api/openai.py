@@ -214,7 +214,11 @@ async def speech(
     if voice and getattr(request.app.state, "voices", None) is not None:
         profile = request.app.state.voices.get(str(voice))
     if profile is not None:
-        model_id = profile.get("model") or registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8")
+        # A profile records the clone engine it was created with. That engine may
+        # no longer be served (e.g. an audio.cpp helper replaced by Omnivoice), so
+        # resolve it to an engine the service actually knows instead of handing a
+        # stale id to a backend that answers "unknown model".
+        model_id = registry.effective_profile_model(profile.get("model"))
         voice = profile["id"]
         language = language or ("ru" if has_cyrillic(text) else "en")
     else:

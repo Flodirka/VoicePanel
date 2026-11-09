@@ -148,6 +148,30 @@ class Registry:
             return "omnivoice"
         return "audiocpp_clone" if backend is self.audiocpp_clone else "audiocpp"
 
+    def effective_profile_model(self, stored: str | None) -> str:
+        """The engine a stored voice profile actually runs on.
+
+        A profile records the clone engine it was created with. When that engine
+        is later removed from the config (e.g. the audio.cpp ``qwen3-tts-clone``
+        helper replaced by the omnivoice.cpp ``omnivoice-q8`` default), the stale
+        id must not be handed to a backend that does not know it - audiocpp would
+        answer ``unknown model id``. Fall back to the currently configured clone
+        engine (then the TTS default, then any known TTS model) so legacy
+        profiles keep working after a config change.
+        """
+        known = self.tts_model_ids()
+        candidate = (stored or "").strip()
+        if candidate in known:
+            return candidate
+        tts_cfg = self.cfg.get("tts", {})
+        for fallback in (
+            tts_cfg.get("clone_model", "omnivoice-q8"),
+            tts_cfg.get("default", ""),
+        ):
+            if fallback and fallback in known:
+                return fallback
+        return known[0] if known else candidate
+
     def diar_model_ids(self) -> list[str]:
         """Diarisation models, from their own process or the main one."""
         ids: list[str] = []

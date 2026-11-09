@@ -124,6 +124,43 @@ def test_speech_endpoint_routes_named_profile_to_clone_model(client: TestClient,
     assert calls == [{"model": "omnivoice-q8", "voice": "routed", "language": "en"}]
 
 
+def test_stale_profile_model_falls_back_to_configured_clone(client: TestClient, monkeypatch) -> None:
+    """A profile recorded under a clone engine that is no longer configured (the
+    audio.cpp qwen3-tts-clone helper after switching to Omnivoice) must keep
+    working. The service resolves the stale id to the current clone engine
+    instead of handing it to a backend that answers \"unknown model id\".
+    """
+    client.post(
+        "/v1/voices",
+        data={"name": "Legacy", "language": "en", "reference_text": "hi"},
+        files={"file": ("ref.wav", _wav_bytes(), "audio/wav")},
+    )
+    registry = client.app.state.registry
+    assert "qwen3-tts-clone" not in registry.tts_model_ids()   # engine is gone
+    # Rewrite the stored profile as if it had been created under the old engine.
+    client.app.state.voices.update("legacy", model="qwen3-tts-clone")
+    assert client.app.state.voices.get("legacy")["model"] == "qwen3-tts-clone"
+
+    calls: list[dict] = []
+
+    async def fake_speech(text, *, model, voice=None, speed=None, language=None, options=None, timeout=300.0):
+        calls.append({"model": model, "voice": voice, "language": language})
+        return _wav_bytes(1.0)
+
+    class FakeBackend:
+        speech = staticmethod(fake_speech)
+
+    monkeypatch.setattr(registry, "tts_backend", lambda model_id: FakeBackend())
+    resp = client.post("/v1/audio/speech", json={"voice": "legacy", "input": "Hello"})
+    assert resp.status_code == 200, resp.text
+    assert calls == [{"model": "omnivoice-q8", "voice": "legacy", "language": "en"}]
+
+    # The profile preview syntaxes through the same resolution path.
+    resp = client.post("/v1/voices/legacy/preview")
+    assert resp.status_code == 200, resp.text
+    assert calls[-1] == {"model": "omnivoice-q8", "voice": "legacy", "language": "en"}
+
+
 def test_tts_routing_picks_the_clone_engine(client: TestClient) -> None:
     registry = client.app.state.registry
     clone = registry.tts_backend("omnivoice-q8")
