@@ -7,6 +7,9 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $path = Join-Path $root $Exe
+if ($Exe -eq 'panel\build\bin\VoicePanel.exe' -and -not (Test-Path -LiteralPath $path)) {
+    $path = Join-Path $root 'VoicePanel.exe'
+}
 if (-not (Test-Path $path)) {
     Write-Host "panel executable not found: $path"
     Write-Host "build it first: tools\build_panel.ps1"

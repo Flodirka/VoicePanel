@@ -89,9 +89,9 @@ MainWindow::MainWindow(PanelApp *app, QWidget *parent) : QMainWindow(parent), ap
         // result pane. Automatic insertion only sends processed batches, so it
         // never reaches the target as if it were corrected or translated.
         processingLabel_->setText(
-            (app_->settings()->autoTranslate ? tr("Translation stopped: %1") : tr("Correction stopped: %1")).arg(error)
+            (app_->settings()->autoTranslate ? tr("Translation pending: %1") : tr("Correction pending: %1")).arg(error)
             + "\n" + tr("The unprocessed text is kept at the end of the result and is not inserted automatically. "
-                        "After recording, right-click and choose Retry correction, or review and copy it."));
+                        "The next phrase retries processing. You can also choose Retry correction after recording."));
         showExpanded();
     });
     connect(&statusTimer_, &QTimer::timeout, this, &MainWindow::updateServiceStatus);
@@ -632,6 +632,7 @@ void MainWindow::onFinalTranscript(const QString &text, qreal seconds, int id) {
 
 void MainWindow::onProcessedBatch(const QString &original, const QString &result) {
     Q_UNUSED(original);
+    processingLabel_->clear();
     processedSoFar_ += (processedSoFar_.isEmpty() ? "" : " ") + result;
     updateResult();
     scheduleQuickInsert();

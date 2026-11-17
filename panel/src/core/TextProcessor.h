@@ -47,6 +47,7 @@ signals:
     // A batch could not be processed (backend error or generation limit). The
     // original stays queued in pendingOriginal() and is never reported as a
     // processed result, so automatic insertion cannot send it.
+    // The next finalized phrase retries the queued text without restarting capture.
     void processingFailed(const QString &original, const QString &error);
     void finished();
     void pendingChanged(const QString &text);

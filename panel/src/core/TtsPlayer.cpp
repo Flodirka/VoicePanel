@@ -210,9 +210,11 @@ void TtsPlayer::saveNext() {
     const bool russian = text.contains(cyrillic);
     const QString language = russian ? "ru" : "en";
     const QString model = model_ == "profile" ? QString("auto") : model_;
-    const QString voice = languageVoices_ ? (russian ? russianVoice_ : englishVoice_) : voiceProfile_;
+    const bool automatic = model_.isEmpty() || model_ == "auto" || model_ == "profile" || model_ == "default";
+    const QString voice = !instructions_.isEmpty() || (!automatic && !speechParameters_.value("voice_cloning").toBool(true)) ? QString() :
+        (languageVoices_ ? (russian ? russianVoice_ : englishVoice_) : voiceProfile_);
     QPointer<TtsPlayer> self(this);
-    service_->speech(text, model, voice, speed_,
+    service_->speech(text, model, voice, (!automatic || voice.isEmpty()) && speechParameters_.value("speed").toBool(voice.isEmpty()) ? speed_ : 1.0,
         [this, self](bool ok, QByteArray wav, QString err) {
             if (!self) return;
             if (!ok) {
@@ -236,7 +238,7 @@ void TtsPlayer::saveNext() {
             }
             savePcm_ += wav.mid(offset, size);
             saveNext();
-        }, language);
+        }, language, instructions_, speechOptions_);
 }
 
 void TtsPlayer::writeSavedFile() {
@@ -273,12 +275,14 @@ void TtsPlayer::requestMore() {
         const bool russian = text.contains(cyrillic);
         const QString language = russian ? "ru" : "en";
         const QString model = model_ == "profile" ? QString("auto") : model_;
-        const QString voice = languageVoices_ ? (russian ? russianVoice_ : englishVoice_) : voiceProfile_;
+        const bool automatic = model_.isEmpty() || model_ == "auto" || model_ == "profile" || model_ == "default";
+        const QString voice = !instructions_.isEmpty() || (!automatic && !speechParameters_.value("voice_cloning").toBool(true)) ? QString() :
+            (languageVoices_ ? (russian ? russianVoice_ : englishVoice_) : voiceProfile_);
         const int id = nextRequest_++;
         ++inflight_;
         const quint64 generation = generation_;
         QPointer<TtsPlayer> self(this);
-        service_->speech(text, model, voice, speed_,
+        service_->speech(text, model, voice, (!automatic || voice.isEmpty()) && speechParameters_.value("speed").toBool(voice.isEmpty()) ? speed_ : 1.0,
             [this, self, generation, id](bool ok, QByteArray wav, QString err) {
                 if (!self || generation != generation_) return;
                 --inflight_;
@@ -304,7 +308,7 @@ void TtsPlayer::requestMore() {
                 }
                 pump();
                 requestMore();
-            }, language);
+            }, language, instructions_, speechOptions_);
     }
 }
 

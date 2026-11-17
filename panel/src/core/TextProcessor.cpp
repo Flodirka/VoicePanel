@@ -40,6 +40,7 @@ void TextProcessor::acceptFinal(const QString &finalText) {
     }
     const QString add = finalText.trimmed();
     if (!add.isEmpty()) {
+        failed_ = false;
         pendingOriginal_ = pendingOriginal_.isEmpty() ? add : pendingOriginal_ + " " + add;
     }
     emit pendingChanged((inFlightOriginal_ + " " + pendingOriginal_).trimmed());

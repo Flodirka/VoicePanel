@@ -4,12 +4,13 @@
 #
 # Usage:
 #   .\tools\package_release.ps1                     # full bundle (copies runtime)
-#   .\tools\package_release.ps1 -CpuOnly            # skip CUDA/Vulkan builds + clone model
+#   .\tools\package_release.ps1 -CpuOnly            # skip CUDA/Vulkan builds
 #   .\tools\package_release.ps1 -Config config.yaml # ship a specific config.yaml (local testing)
 #   .\tools\package_release.ps1 -Zip                # also write dist\VoicePanel-<ver>.zip + .sha256
 param(
     [string]$Out = "dist",
     [string]$PanelBin = "panel\build\bin",
+    [string]$RuntimeBin = "runtime\bin",
     [string]$Config = "",
     [string[]]$Models = @(
         "nemotron-3.5-asr-streaming-0.6b-q8_0.gguf",
@@ -19,9 +20,10 @@ param(
         "kokoro-82m-q8_0.gguf",
         "ggml-small.bin",
         "piper-ru-ruslan-medium.gguf",
-        "qwen3-tts-12hz-0.6b-base-q8_0.gguf"
+        "piper-ru-irina-medium.gguf"
     ),
-    [string[]]$ModelDirs = @("plamo-3-translate"),
+    [string[]]$ModelDirs = @("plamo-3-translate", "omnivoice"),
+    [switch]$NoModels,
     [switch]$CpuOnly,
     [switch]$Zip
 )
@@ -30,7 +32,10 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $version = (Select-String -Path "service\voiceservice\__init__.py" -Pattern '__version__' | Select-Object -First 1).Line -replace '.*"([^"]+)".*', '$1'
-$bundle = Join-Path $root (Join-Path $Out "VoicePanel")
+$bundle = [IO.Path]::GetFullPath((Join-Path $root (Join-Path $Out "VoicePanel")))
+if (-not $bundle.StartsWith($root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Release output must stay inside the checkout: $bundle"
+}
 if (Test-Path $bundle) { Remove-Item -LiteralPath $bundle -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $bundle | Out-Null
 
@@ -42,7 +47,7 @@ function Copy-Panel {
     Get-ChildItem $PanelBin -Recurse -File | Where-Object {
         $_.FullName -notmatch 'test-records|test-state-' -and
         $_.Extension -ne '.png' -and
-        $_.Name -ne 'VoicePanelTests.exe'
+        $_.Name -notin @('VoicePanelTests.exe', 'Qt6Test.dll', 'check-bundle.txt')
     } | ForEach-Object {
         $rel = $_.FullName.Substring((Resolve-Path $PanelBin).Path.Length).TrimStart('\')
         $dest = Join-Path $bundle $rel
@@ -53,18 +58,25 @@ function Copy-Panel {
 }
 
 function Copy-Code {
-    foreach ($dir in @("service", "tools")) {
-        Copy-Item -LiteralPath $dir -Destination (Join-Path $bundle $dir) -Recurse -Force -Exclude "__pycache__"
+    $publicFiles = @(& git -c core.quotepath=false ls-files -- service tools docs licenses assets panel/resources/fonts/OFL.txt)
+    if ($LASTEXITCODE -ne 0) { throw 'Packaging requires the source Git checkout' }
+    foreach ($relative in $publicFiles) {
+        $target = Join-Path $bundle $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $root $relative) -Destination $target -Force
     }
-    foreach ($f in @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "config.example.yaml", "ROADMAP.md")) {
+    foreach ($f in @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "config.example.yaml", "ROADMAP.md", "CHANGELOG.md")) {
         if (Test-Path $f) { Copy-Item -LiteralPath $f -Destination (Join-Path $bundle $f) -Force }
     }
-    if (Test-Path "docs") { Copy-Item -LiteralPath "docs" -Destination (Join-Path $bundle "docs") -Recurse -Force }
-    if (Test-Path "licenses") { Copy-Item -LiteralPath "licenses" -Destination (Join-Path $bundle "licenses") -Recurse -Force }
     # The bundle ships a ready config.yaml: the minimal base by default
     # (config.example.yaml), or -Config <file> for a custom one.
     $shipConfig = if ($Config -and (Test-Path $Config)) { $Config } else { "config.example.yaml" }
     Copy-Item -LiteralPath $shipConfig -Destination (Join-Path $bundle "config.yaml") -Force
+    if ($CpuOnly) {
+        $configPath = Join-Path $bundle "config.yaml"
+        (Get-Content -LiteralPath $configPath -Raw).Replace('runtime/bin/llama-vulkan/llama-server.exe', 'runtime/bin/llama-cpu/llama-server.exe') |
+            Set-Content -LiteralPath $configPath -Encoding utf8 -NoNewline
+    }
     Write-Host "config: shipped $shipConfig as config.yaml"
     # The panel looks for silero next to its exe in the portable layout.
     $portableModels = Join-Path $bundle "models"
@@ -77,13 +89,14 @@ function Copy-Code {
 function Copy-Runtime {
     # All engine builds ship: CPU always works; audiocpp-cuda/llama-cuda power the
     # clone helper and the GPU option in Server settings (compute groups).
-    $binDirs = @("audiocpp-cpu", "audiocpp-cuda", "audiocpp-vulkan", "whisper-cpu", "llama-cpu", "llama-cuda", "llama-vulkan")
+    $binDirs = @("audiocpp-cpu", "whisper-cpu", "llama-cpu", "omnivoice-cpu")
+    if (-not $CpuOnly) { $binDirs += @("audiocpp-cuda", "audiocpp-vulkan", "llama-cuda", "llama-vulkan", "omnivoice-cuda") }
     foreach ($d in $binDirs) {
-        $src = Join-Path $root "runtime\bin\$d"
+        $src = Join-Path $RuntimeBin $d
         if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $bundle "runtime\bin\$d") -Recurse -Force }
     }
     $modelFiles = $Models
-    if (-not $CpuOnly) { $modelFiles += @("Hy-MT2-1.8B-Q4_K_M.gguf", "chatterbox-q8_0.gguf", "ggml-base.bin", "ggml-large-v3-turbo-q5_0.bin") }
+    if ($NoModels) { $modelFiles = @() }
     New-Item -ItemType Directory -Force -Path (Join-Path $bundle "runtime\models") | Out-Null
     foreach ($m in $modelFiles) {
         $src = Join-Path $root "runtime\models\$m"
@@ -94,11 +107,15 @@ function Copy-Runtime {
         }
     }
     foreach ($d in $ModelDirs) {
+        if ($NoModels) { continue }
         $src = Join-Path $root "runtime\models\$d"
         if (Test-Path $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $bundle "runtime\models\$d") -Recurse -Force }
     }
-    $third = Join-Path $root "runtime\third_party"
-    if (Test-Path $third) { Copy-Item -LiteralPath $third -Destination (Join-Path $bundle "runtime\third_party") -Recurse -Force }
+    $espeak = Join-Path $root "runtime\third_party\espeak-ng"
+    if (Test-Path $espeak) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $bundle "runtime\third_party") | Out-Null
+        Copy-Item -LiteralPath $espeak -Destination (Join-Path $bundle "runtime\third_party\espeak-ng") -Recurse -Force
+    }
     New-Item -ItemType Directory -Force -Path (Join-Path $bundle "runtime\voice-library") | Out-Null
     Write-Host "runtime: copied (CpuOnly=$CpuOnly)"
 }

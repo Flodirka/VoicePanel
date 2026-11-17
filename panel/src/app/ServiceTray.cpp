@@ -21,11 +21,11 @@ ServiceTray::ServiceTray(const QString &url, QObject *parent)
     : QObject(parent), menu_(std::make_unique<QMenu>()), url_(url) {
     setObjectName("serviceIndicator");
     client_.setBaseUrl(url);
-    // The service is a Python program, not an executable: the script starts it
-    // and waits until it is healthy. In a packaged layout the script is absent
-    // and the action says so instead of failing silently.
+    // Resolve the launcher in a source checkout or a packaged layout.
     scriptPath_ = QDir::cleanPath(QDir(QCoreApplication::applicationDirPath())
                                       .absoluteFilePath("../../../tools/start-service.ps1"));
+    if (!QFileInfo::exists(scriptPath_))
+        scriptPath_ = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("tools/start-service.ps1");
     status_ = menu_->addAction(tr("Voice service · Checking…"));
     status_->setObjectName("serviceStatus");
     status_->setEnabled(false);

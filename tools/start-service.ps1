@@ -1,19 +1,34 @@
 # Starts the Voice AI Service in the background and waits until it is healthy.
 param(
     [string]$Config = "config.yaml",
-    [int]$Port = 8080
+    [int]$Port = 8080,
+    [string]$TtsEngine = "",
+    [string]$AsrEngine = "",
+    [string]$Python = "python"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+$localPython = Join-Path $root 'runtime\venv\Scripts\python.exe'
+if ($Python -eq 'python' -and (Test-Path -LiteralPath $localPython)) { $Python = $localPython }
 
 if (-not (Test-Path $Config)) {
     Write-Host "config not found: $Config (copy config.example.yaml to config.yaml first)"
     exit 1
 }
 
+if ($TtsEngine -or $AsrEngine) {
+    $engineArgs = @("tools\configure_backends.py", "--config", $Config)
+    if ($TtsEngine) { $engineArgs += @("--tts", $TtsEngine) }
+    if ($AsrEngine) { $engineArgs += @("--asr", $AsrEngine) }
+    & $Python @engineArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Host "Backend choices are saved for the next service start."
+}
+
 function Start-ServiceIndicator {
     $indicator = Join-Path $root 'panel\build\bin\VoicePanel.exe'
+    if (-not (Test-Path -LiteralPath $indicator)) { $indicator = Join-Path $root 'VoicePanel.exe' }
     if (Test-Path -LiteralPath $indicator) {
         Start-Process -FilePath $indicator -ArgumentList @('--service-tray', "http://127.0.0.1:$Port") -WorkingDirectory (Split-Path -Parent $indicator) -WindowStyle Hidden | Out-Null
     } else {
@@ -21,7 +36,7 @@ function Start-ServiceIndicator {
     }
 }
 
-& python -c "import fastapi, uvicorn" 2>$null
+& $Python -c "import fastapi, uvicorn" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "the 'python' on PATH has no service dependencies. Install them with:"
     Write-Host "  python -m pip install --user -r service\requirements.txt"
@@ -40,7 +55,7 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 $outLog = Join-Path $logDir "service.log"
 $errLog = Join-Path $logDir "service.err.log"
 
-$proc = Start-Process -FilePath "python" `
+$proc = Start-Process -FilePath $Python `
     -ArgumentList @("tools\run_service.py", "--config", $Config) `
     -WorkingDirectory $root -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog

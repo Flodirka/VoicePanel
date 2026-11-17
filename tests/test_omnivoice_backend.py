@@ -9,13 +9,23 @@ stream splitting, stalls, restarts, reference caching — is tested offline.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import struct
 import sys
 from pathlib import Path
 
 import pytest
+import httpx
 
-from voiceservice.backends.omnivoice import OmnivoiceBackend, OmnivoiceError
+from voiceservice.backends.omnivoice import OmnivoiceBackend, OmnivoiceHttpBackend, OmnivoiceError
+
+
+def test_default_http_backend_ports_do_not_collide() -> None:
+    from voiceservice.config import DEFAULTS
+
+    ports = [entry["port"] for entry in DEFAULTS["backends"].values() if "port" in entry]
+    assert len(ports) == len(set(ports))
 
 FAKE_ENGINE = r"""
 import struct, sys
@@ -109,6 +119,92 @@ def test_two_requests_yield_valid_wavs(tmp_path: Path) -> None:
         await backend.stop()
         assert not backend.running
 
+    asyncio.run(run())
+
+
+def test_neutral_speed_from_panel_is_accepted(tmp_path: Path) -> None:
+    async def run() -> None:
+        backend = make_backend(tmp_path)
+        try:
+            wav = await backend.speech("Hello.", model="omnivoice-q8", speed=1.0)
+            assert wav[:4] == b"RIFF"
+        finally:
+            await backend.stop()
+    asyncio.run(run())
+
+
+def test_http_keeps_the_model_when_voice_language_or_design_changes(tmp_path: Path) -> None:
+    cfg = {**make_backend(tmp_path).cfg, "binary": str(tmp_path / "tts-server.exe"), "port": 8106}
+    backend = OmnivoiceHttpBackend(cfg, tmp_path / "logs")
+    backend.proc._owned_and_healthy = lambda: True
+    backend.voice_dir.mkdir()
+    for name in ("one", "two"):
+        (backend.voice_dir / f"{name}.wav").write_bytes(b"reference")
+        (backend.voice_dir / f"{name}.rvq").write_bytes(b"cached codes")
+    (backend.voice_dir / "prompt_text").write_text("one|First reference.\ntwo|Second reference.", encoding="utf-8")
+    requests = []
+    def handle(request):
+        requests.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, content=b"RIFF-test")
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            backend.proc.http = lambda: client
+            process = backend.proc
+            await backend.speech("First.", model="omnivoice-q8", voice="one", language="en")
+            await backend.speech("Second.", model="omnivoice-q8", voice="two", language="ru")
+            await backend.speech("Third.", model="omnivoice-q8", voice="one", language="ru")
+            await backend.speech("Design.", model="omnivoice-q8", options={"instruct": "female", "seed": 42})
+            assert backend.proc is process
+            assert len([p for p, _ in requests if p.endswith("/voices")]) == 2
+            assert requests[-1][1]["instructions"] == "female"
+            assert requests[-1][1]["seed"] == 42
+            assert backend.status()["leases"] == 0
+            with pytest.raises(OmnivoiceError, match="unsupported"):
+                await backend.speech("Steps.", model="omnivoice-q8", options={"steps": 8})
+            await backend.stop()
+    asyncio.run(run())
+
+
+def test_reference_cache_is_rebuilt_only_when_audio_changes(tmp_path: Path, monkeypatch) -> None:
+    backend = make_backend(tmp_path)
+    backend.voice_dir.mkdir()
+    wav = backend.voice_dir / "updated.wav"
+    rvq = backend.voice_dir / "updated.rvq"
+    wav.write_bytes(b"new reference")
+    rvq.write_bytes(b"old codes")
+    os.utime(rvq, (1, 1))
+    (backend.voice_dir / "prompt_text").write_text("updated|Reference.", encoding="utf-8")
+    encodings = []
+    def encode(voice, audio, codes):
+        encodings.append(voice)
+        codes.write_bytes(b"new codes")
+    monkeypatch.setattr(backend, "_encode_reference", encode)
+    backend._reference_args("updated")
+    backend._reference_args("updated")
+    assert encodings == ["updated"]
+    assert rvq.read_bytes() == b"new codes"
+
+
+def test_design_options_change_process_and_are_not_reused(tmp_path: Path) -> None:
+    async def run() -> None:
+        backend = make_backend(tmp_path)
+        try:
+            options = {"instruct": "female, low pitch", "steps": 8, "seed": 42}
+            await backend.speech("Hello.", model="omnivoice-q8", options=options)
+            args = backend._proc.args
+            assert args[args.index("--instruct") + 1] == "female, low pitch"
+            assert args[args.index("--steps") + 1] == "8"
+            assert args[args.index("--seed") + 1] == "42"
+            first_pid = backend._proc.pid
+            await backend.speech("Again.", model="omnivoice-q8", options=options)
+            assert backend._proc.pid == first_pid
+            await backend.speech("Changed.", model="omnivoice-q8", options={**options, "instruct": "male"})
+            assert backend._proc.pid != first_pid
+            await backend.speech("Default.", model="omnivoice-q8")
+            assert "--instruct" not in backend._proc.args
+        finally:
+            await backend.stop()
     asyncio.run(run())
 
 

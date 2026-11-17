@@ -109,11 +109,10 @@ backends:
         supports_language: false
 
   # -------------------------------------------------- cloning engine (omnivoice)
-  # k2-fsa omnivoice.cpp driving OmniVoice 0.6B Q8_0 (~945 MB total, 600+
+  # ServeurpersoCom/omnivoice.cpp driving the k2-fsa OmniVoice model (~945 MB total, 600+
   # languages, zero-shot cloning; weights CC-BY-NC 4.0 - download yourself, see
-  # README "Models"). A stdin/stdout CLI supervised by the service
-  # (service/voiceservice/backends/omnivoice.py): one warm child, one utterance
-  # per input line, stopped after idle_stop_s. The `clone` compute group swaps
+  # README "Models"). The native HTTP server retains one model across voices
+  # and languages and stops after idle_stop_s. The `clone` compute group swaps
   # this binary between omnivoice-cpu and omnivoice-cuda builds (the CUDA build
   # makes cloned-voice TTS fast enough for real-time calls; the CPU build is
   # slow, RTF ~10-24 measured under load).
@@ -122,13 +121,13 @@ backends:
   #   omnivoice-tokenizer-Q8_0.gguf into runtime/models/omnivoice/
   omnivoice:
     enabled: true
-    binary: runtime/bin/omnivoice-cpu/omnivoice-tts.exe
+    binary: runtime/bin/omnivoice-cpu/tts-server.exe
+    port: 8107
     codec_binary: runtime/bin/omnivoice-cpu/omnivoice-codec.exe
     backend: cpu          # bookkeeping for the compute switch (cpu | cuda)
-    threads: 8
-    steps: 32             # MaskGIT decode steps; fewer is faster, lower quality
+    steps: 32             # legacy omnivoice-tts CLI only; HTTP uses 32 steps
     voice_dir: runtime/voice-library
-    idle_stop_s: 300      # stop the child (frees ~1 GB RAM) when idle
+    idle_stop_s: 60       # release the speech model after a minute without requests
     start_timeout_s: 120
     request_timeout_s: 600
     max_line_chars: 300
@@ -179,6 +178,7 @@ backends:
     idle_stop_s: 1800
 
   llama:
+    template_style: loqira_gec  # exact single-turn prompt required by the configured GEC model
     # Text CORRECTION on the CPU. Default: the small GEC model (563 MB). The
     # service always sends enable_thinking=false, which this model needs
     # (thinking mode produced empty/wrong output - measured). Deterministic
@@ -203,16 +203,15 @@ backends:
     gpu_layers: 0            # 0 = CPU only
     flash_attn: true
     threads: 8
-    # Host-RAM prompt cache (llama-server --cache-ram). llama.cpp's default is
-    # 8192 MiB; one dictation slot needs a few cached prompts at most. Set to
-    # null to keep the llama.cpp default.
-    cache_ram_mib: 512
+    # Host-RAM prompt snapshots (llama-server --cache-ram). Zero avoids keeping
+    # old snapshots; null inherits the runtime default.
+    cache_ram_mib: 0      # disable old slot snapshots; the active slot still reuses its KV cache
     # KV cache storage: unset keeps f16. q8_0 for both halves KV memory
     # (about 0.56 GB less for this model at ctx_size 8192); measure quality
     # with tools/bench before switching. V quantization needs flash_attn.
     # cache_type_k: q8_0
     # cache_type_v: q8_0
-    idle_stop_s: 300         # free RAM soon after a session ends
+    idle_stop_s: 90
 
   # Dedicated TRANSLATION model: translation modes (translate_ru_en /
   # translate_en_ru) route here; correction stays on `llama`.
@@ -235,5 +234,5 @@ backends:
     gpu_layers: 0
     flash_attn: true
     threads: 8
-    cache_ram_mib: 512
-    idle_stop_s: 300
+    cache_ram_mib: 0
+    idle_stop_s: 90

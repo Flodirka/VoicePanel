@@ -15,6 +15,7 @@ class QPlainTextEdit;
 namespace VoicePanel {
 
 class PanelApp;
+class VoiceDesignWidget;
 
 // Settings UI: simple defaults up front, advanced VAD controls in a collapsible
 // group, plus voice profile management (create from recording/file, preview,
@@ -76,6 +77,7 @@ private:
     QString pendingVoiceLanguage_;
     QString pendingVoiceId_;
     QDoubleSpinBox *ttsSpeed_ = nullptr;
+    VoiceDesignWidget *voiceDesign_ = nullptr;
 
     // storage
     QLineEdit *markdownDir_ = nullptr;

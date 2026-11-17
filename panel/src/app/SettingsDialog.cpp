@@ -1,4 +1,5 @@
 #include "app/SettingsDialog.h"
+#include "app/VoiceDesignWidget.h"
 #include <QComboBox>
 
 namespace {
@@ -425,6 +426,15 @@ void SettingsDialog::buildUi() {
     ttsSpeed_->setRange(0.5, 2.0);
     ttsSpeed_->setSingleStep(0.1);
     ttsForm->addRow(tr("Speed"), ttsSpeed_);
+    voiceDesign_ = new VoiceDesignWidget;
+    ttsForm->addRow(voiceDesign_);
+    connect(ttsModel_, &QComboBox::currentIndexChanged, this, [this] {
+        voiceDesign_->setModel(ttsModel_->currentData().toString());
+    });
+    connect(voiceDesign_, &VoiceDesignWidget::speedSupported, this, [this](bool supported) {
+        ttsSpeed_->setEnabled(supported);
+        if (!supported) ttsSpeed_->setValue(1.0);
+    });
     lay->addWidget(ttsBox);
 
     // ---- voice profiles ----
@@ -581,6 +591,8 @@ void SettingsDialog::load() {
     speculative_->setChecked(s->speculative);
 
     ttsSpeed_->setValue(s->ttsSpeed);
+    voiceDesign_->setInstructions(s->ttsInstructions);
+    voiceDesign_->setOptions(s->ttsOptions);
     if (!s->ttsModel.isEmpty() && ttsModel_->findData(s->ttsModel) < 0)
         ttsModel_->addItem(s->ttsModel, s->ttsModel);
     ttsModel_->setCurrentIndex(qMax(0, ttsModel_->findData(s->ttsModel)));
@@ -596,7 +608,16 @@ void SettingsDialog::loadServiceModels() {
     QPointer<SettingsDialog> self(this);
     app_->service()->getJson("/v1/models", [this, self](bool ok, QByteArray body, QString) {
         if (!self || !ok) return;
-        const auto arr = QJsonDocument::fromJson(body).object().value("data").toArray();
+        const auto response = QJsonDocument::fromJson(body).object();
+        const auto arr = response.value("data").toArray();
+        auto descriptors = arr;
+        const auto aliases = response.value("speech_aliases").toObject();
+        for (auto it = aliases.begin(); it != aliases.end(); ++it) {
+            auto entry = it.value().toObject();
+            entry.insert("id", it.key());
+            descriptors.append(entry);
+        }
+        voiceDesign_->setModels(descriptors);
         QStringList asr, tts;
         for (const auto &v : arr) {
             const auto o = v.toObject();
@@ -626,6 +647,7 @@ void SettingsDialog::loadServiceModels() {
                 ttsModel_->setCurrentIndex(0);
             }
         }
+        voiceDesign_->setModel(ttsModel_->currentData().toString());
     });
 }
 
@@ -642,17 +664,17 @@ void SettingsDialog::refreshVoices() {
             pendingVoiceId_.clear();
         }
     }
-    const auto populate = [this](QComboBox *combo, const QString &selected, bool russian) {
+    const auto populate = [this](QComboBox *combo, const QString &selected) {
         const QSignalBlocker blocker(combo);
         combo->clear();
-        combo->addItem(russian ? tr("Built-in voice (English only)") : tr("Built-in English voice"), "builtin");
+        combo->addItem(tr("Model default (no voice profile)"), "builtin");
         for (const auto &voice : app_->voices()->profiles()) combo->addItem(voice.name, voice.id);
         if (!selected.isEmpty() && combo->findData(selected) < 0)
             combo->addItem(tr("Saved voice (currently unavailable)"), selected);
         combo->setCurrentIndex(qMax(0, combo->findData(selected)));
     };
-    populate(ttsRussianVoice_, selectedRussianVoice_, true);
-    populate(ttsEnglishVoice_, selectedEnglishVoice_, false);
+    populate(ttsRussianVoice_, selectedRussianVoice_);
+    populate(ttsEnglishVoice_, selectedEnglishVoice_);
 }
 
 void SettingsDialog::createVoice() {
@@ -846,6 +868,8 @@ void SettingsDialog::accept() {
     s->ttsRussianVoice = selectedRussianVoice_;
     s->ttsEnglishVoice = selectedEnglishVoice_;
     s->ttsSpeed = ttsSpeed_->value();
+    s->ttsInstructions = voiceDesign_->savedInstructions();
+    s->ttsOptions = voiceDesign_->savedOptions();
     s->markdownDir = markdownDir_->text();
     s->autoSaveSessions = autoSave_->isChecked();
     s->audioRetentionDays = audioRetention_->value();

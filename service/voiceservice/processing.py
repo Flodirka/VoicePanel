@@ -86,6 +86,13 @@ MODE_PROMPTS: dict[str, str] = {
 # back as "We need to fix..."). Only switch them on together with the small model.
 USE_CORRECTION_RULES = False
 
+# loqira/Qwen3.5-0.8B-GEC-KAZ-RUS-ENG model card: the trained single-turn prompt.
+LOQIRA_GEC_PROMPT = (
+    "Отформатируй текст голосового ввода: расставь пунктуацию и заглавные буквы, "
+    "разбей на абзацы, исправь опечатки и орфографические ошибки. "
+    "Сохрани язык, слова и смысл, ничего не добавляй от себя."
+)
+
 CORRECTION_RULES = (
     "Fix grammar completely: verb agreement, articles, tense, capitalization, "
     "punctuation and prepositions, not only spelling. Keep the author's words "

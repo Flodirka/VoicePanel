@@ -4,6 +4,7 @@
 #include "core/ServiceClient.h"
 #include <QComboBox>
 #include <QGroupBox>
+#include <QFormLayout>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -58,6 +59,25 @@ void ServerSettingsDialog::buildUi() {
     shared->setWordWrap(true);
     shared->setProperty("role", "caption");
     root->addWidget(shared);
+
+    auto *chooseEngines = new QPushButton(tr("Choose backends for the next service start…"));
+    chooseEngines->setObjectName("chooseBackends");
+    root->addWidget(chooseEngines);
+    connect(chooseEngines, &QPushButton::clicked, this, &ServerSettingsDialog::loadEngines);
+    enginesBox_ = new QGroupBox(tr("Backends for the next start"));
+    auto *enginesForm = new QFormLayout(enginesBox_);
+    asrEngine_ = new QComboBox;
+    asrEngine_->setObjectName("asrEngine");
+    ttsEngine_ = new QComboBox;
+    ttsEngine_->setObjectName("ttsEngine");
+    enginesForm->addRow(tr("Recognition"), asrEngine_);
+    enginesForm->addRow(tr("Voice synthesis and cloning"), ttsEngine_);
+    auto *saveEngines = new QPushButton(tr("Save backends for next start"));
+    saveEngines->setObjectName("saveBackends");
+    enginesForm->addRow(saveEngines);
+    connect(saveEngines, &QPushButton::clicked, this, &ServerSettingsDialog::saveEngines);
+    root->addWidget(enginesBox_);
+    enginesBox_->hide();
 
     status_ = new QLabel(tr("Reading the service…"));
     status_->setObjectName("serverComputeStatus");
@@ -187,4 +207,45 @@ void ServerSettingsDialog::save() {
 QString ServerSettingsDialog::errorDetail(const QByteArray &body, const QString &fallback) const {
     const auto detail = QJsonDocument::fromJson(body).object().value("detail").toString();
     return detail.isEmpty() ? fallback : detail;
+}
+
+void ServerSettingsDialog::loadEngines() {
+    QPointer<ServerSettingsDialog> self(this);
+    client_->getJson("/admin/engines", [this, self](bool ok, QByteArray body, QString error) {
+        if (!self) return;
+        if (!ok) { status_->setText(errorDetail(body, error)); return; }
+        const auto snapshot = QJsonDocument::fromJson(body).object();
+        const auto selected = snapshot.value("selected").toObject();
+        const auto available = snapshot.value("available").toObject();
+        for (const auto &task : {QString("asr"), QString("tts")}) {
+            auto *combo = task == "asr" ? asrEngine_ : ttsEngine_;
+            combo->clear();
+            for (const auto &value : available.value(task).toArray()) {
+                const auto choice = value.toObject();
+                if (choice.value("available").toBool()) combo->addItem(
+                    choice.value("id").toString() + " (" + choice.value("model").toString() + ")", choice.value("id").toString());
+            }
+            const QString id = selected.value(task).toString();
+            if (combo->findData(id) < 0) combo->addItem(tr("%1 (files unavailable)").arg(id), id);
+            combo->setCurrentIndex(combo->findData(id));
+            engineChoices_[task] = id;
+        }
+        enginesBox_->show();
+        status_->setText(snapshot.value("restart_required").toBool()
+            ? tr("Backend choices are saved. Stop the service, then start it from its tray menu to use them.")
+            : tr("Backend changes take effect after a service restart."));
+    });
+}
+
+void ServerSettingsDialog::saveEngines() {
+    QJsonObject changes;
+    if (asrEngine_->currentData().toString() != engineChoices_.value("asr")) changes.insert("asr", asrEngine_->currentData().toString());
+    if (ttsEngine_->currentData().toString() != engineChoices_.value("tts")) changes.insert("tts", ttsEngine_->currentData().toString());
+    if (changes.isEmpty()) return;
+    QPointer<ServerSettingsDialog> self(this);
+    client_->postJson("/admin/engines", QJsonDocument(changes).toJson(), [this, self](bool ok, QByteArray body, QString error) {
+        if (!self) return;
+        if (!ok) { status_->setText(errorDetail(body, error)); return; }
+        loadEngines();
+    });
 }

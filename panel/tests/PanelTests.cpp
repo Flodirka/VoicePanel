@@ -6,6 +6,7 @@
 #include "app/ServerSettingsDialog.h"
 #include "app/SettingsDialog.h"
 #include "app/VoicePlaybackDialog.h"
+#include "app/VoiceDesignWidget.h"
 #include "app/ServiceTray.h"
 #include "core/AudioMeter.h"
 #include "core/DictationController.h"
@@ -1107,6 +1108,88 @@ private slots:
         QTRY_COMPARE(stopped.size(), 1);
     }
 
+    void voiceDesignFollowsSelectedModelCapabilities() {
+        VoiceDesignWidget design;
+        const QJsonObject schema{{"gender", QJsonArray{"male", "female"}},
+                                 {"pitch", QJsonArray{"low pitch", "high pitch"}}};
+        design.setModels(QJsonArray{
+            QJsonObject{{"id", "omni"}, {"speech_parameters", QJsonObject{
+                {"instructions", true}, {"speed", false}, {"voice_design", schema}, {"options", QJsonArray{"steps", "seed"}}}}},
+            QJsonObject{{"id", "piper"}, {"speech_parameters", QJsonObject{{"instructions", false}, {"speed", true}}}},
+        });
+        design.setInstructions("female, low pitch");
+        design.setOptions(QJsonObject{{"steps", 16}, {"seed", 42}});
+        design.setModel("omni");
+        QVERIFY(!design.isHidden());
+        QCOMPARE(design.instructions(), QString("female, low pitch"));
+        QCOMPARE(design.options().value("steps").toInt(), 16);
+        auto *gender = design.findChild<QComboBox *>("voiceDesign_gender");
+        QVERIFY(gender);
+        gender->setCurrentIndex(gender->findData("male"));
+        QCOMPARE(design.instructions(), QString("male, low pitch"));
+        design.setModel("piper");
+        QVERIFY(design.isHidden());
+        QVERIFY(design.instructions().isEmpty());
+        QVERIFY(design.options().isEmpty());
+        QCOMPARE(design.savedInstructions(), QString("male, low pitch"));
+        QCOMPARE(design.savedOptions().value("seed").toInt(), 42);
+        design.setModel("omni");
+        QCOMPARE(design.instructions(), QString("male, low pitch"));
+    }
+
+    void selectingSameModelForACloneClearsPreviousDesign() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TtsPlayer player(&client);
+        player.setModel("omnivoice-q8");
+        player.setInstructions("female");
+        player.setSpeechOptions(QJsonObject{{"seed", 42}});
+        player.setModel("omnivoice-q8");
+        player.setVoiceProfile("saved-clone");
+        player.speak("This is a cloned voice.");
+        QTRY_COMPARE(server.requests.size(), 1);
+        const auto payload = QJsonDocument::fromJson(server.requests[0]->property("body").toByteArray()).object();
+        QCOMPARE(payload.value("voice").toString(), QString("saved-clone"));
+        QVERIFY(!payload.contains("instructions"));
+        QVERIFY(!payload.contains("options"));
+        player.stop();
+        server.reply(0, "cancelled");
+    }
+
+    void speechDesignReachesApiAndDoesNotLeakIntoBuiltinSpeech() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TtsPlayer player(&client);
+        player.setModel("omnivoice-q8");
+        player.setVoiceProfile("saved-clone");
+        player.setSpeed(1.5);
+        player.setSpeechParameters(QJsonObject{{"speed", false}, {"voice_cloning", true}});
+        player.setInstructions("female, low pitch");
+        player.setSpeechOptions(QJsonObject{{"steps", 16}, {"seed", 42}});
+        player.speak("This is a complete sentence.");
+        QTRY_COMPARE(server.requests.size(), 1);
+        auto payload = QJsonDocument::fromJson(server.requests[0]->property("body").toByteArray()).object();
+        QCOMPARE(payload.value("instructions").toString(), QString("female, low pitch"));
+        QCOMPARE(payload.value("options").toObject().value("seed").toInt(), 42);
+        QVERIFY(!payload.contains("voice"));
+        QVERIFY(!payload.contains("speed"));
+        player.stop();
+        server.reply(0, "cancelled");
+        player.setModel("piper-ru");
+        player.setSpeechParameters(QJsonObject{{"speed", true}, {"voice_cloning", false}});
+        player.speak("This is a different sentence.");
+        QTRY_COMPARE(server.requests.size(), 2);
+        payload = QJsonDocument::fromJson(server.requests[1]->property("body").toByteArray()).object();
+        QVERIFY(!payload.contains("instructions"));
+        QVERIFY(!payload.contains("options"));
+        QVERIFY(!payload.contains("voice"));
+        QCOMPARE(payload.value("speed").toDouble(), 1.5);
+        player.stop();
+        server.reply(1, "cancelled");
+    }
+
     void disablingAutoTranslationIgnoresThePendingResponse() {
         TestServer server;
         app_->service()->setBaseUrl(server.url());
@@ -1135,26 +1218,28 @@ private slots:
         auto *text = dialog.findChild<QPlainTextEdit *>("speechText");
         auto *play = dialog.findChild<QPushButton *>("speechToggle");
         QVERIFY(text && play);
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, R"({"data":[]})");
         text->setPlainText(QString::fromUtf8("Привет, это мой голос."));
         play->click();
-        QTRY_COMPARE(server.requests.size(), 1);
-        auto payload = QJsonDocument::fromJson(server.requests[0]->property("body").toByteArray()).object();
+        QTRY_COMPARE(server.requests.size(), 2);
+        auto payload = QJsonDocument::fromJson(server.requests[1]->property("body").toByteArray()).object();
         QCOMPARE(payload.value("voice").toString(), QString("my-russian-voice"));
         QCOMPARE(payload.value("language").toString(), QString("ru"));
         QVERIFY(payload.value("input").toString().endsWith('.'));
         QCOMPARE(play->text(), QString("Stop"));
         play->click();
         QVERIFY(!app_->tts()->speaking());
-        server.reply(0, "cancelled audio");
+        server.reply(1, "cancelled audio");
         QTest::qWait(30);
         text->setPlainText("Hello, this is my voice.");
         play->click();
-        QTRY_COMPARE(server.requests.size(), 2);
-        payload = QJsonDocument::fromJson(server.requests[1]->property("body").toByteArray()).object();
+        QTRY_COMPARE(server.requests.size(), 3);
+        payload = QJsonDocument::fromJson(server.requests[2]->property("body").toByteArray()).object();
         QCOMPARE(payload.value("voice").toString(), QString("my-english-voice"));
         QCOMPARE(payload.value("language").toString(), QString("en"));
         play->click();
-        server.reply(1, "cancelled audio");
+        server.reply(2, "cancelled audio");
         QVERIFY(dialog.grab().save("voice-playback.png"));
         app_->settings()->ttsRussianVoice = previousRu;
         app_->settings()->ttsEnglishVoice = previousEn;
@@ -1494,6 +1579,36 @@ private slots:
         app_->hotkeys()->unregisterAll();
     }
 
+    void liveTranslationKeepsProcessingQueuedSpeechAfterAFailure() {
+        for (const auto mode : {SessionController::Mode::Interpreter, SessionController::Mode::Subtitles}) {
+            TestServer server;
+            ServiceClient client;
+            client.setBaseUrl(server.url());
+            TtsPlayer tts(&client);
+            SessionController control(&client, &tts);
+            control.configure(Settings{}, mode);
+            control.running_ = true;
+            QSignalSpy captions(&control, &SessionController::caption);
+            QSignalSpy failures(&control, &SessionController::error);
+            const QVector<float> samples(8000, 0.05f);
+            for (int i = 0; i < 12; ++i) control.onUtterance(true, samples, double(i));
+            for (int i = 0; i < 12; ++i) {
+                QTRY_COMPARE(server.requests.size(), i * 2 + 1);
+                server.reply(i * 2, QString("{\"text\":\"Phrase %1.\"}").arg(i).toUtf8());
+                QTRY_COMPARE(server.requests.size(), i * 2 + 2);
+                if (i == 4) server.reply(i * 2 + 1, R"({"detail":"temporary backend failure"})", false);
+                else server.reply(i * 2 + 1, QString("{\"result\":\"Translation %1.\"}").arg(i).toUtf8());
+                QTRY_VERIFY(!control.busy_ || server.requests.size() == i * 2 + 3);
+                QVERIFY(control.running());
+            }
+            QTRY_COMPARE(captions.size(), 11);
+            QCOMPARE(failures.size(), 1);
+            QCOMPARE(captions.last()[0].toString(), QString("Phrase 11."));
+            QVERIFY(control.remoteQueue_.isEmpty());
+            control.stop();
+        }
+    }
+
     void interpreterTurnsIncomingSpeechIntoARussianCaption() {
         TestServer server;
         ServiceClient client;
@@ -1735,6 +1850,31 @@ private slots:
         QCOMPARE(processor.pendingOriginal(), QString("First sentence. Second sentence."));
     }
 
+    void processingResumesOnNewSpeechAfterAnErrorWithoutRestarting() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TextProcessor processor(&client);
+        processor.setMode("correct_en");
+        QSignalSpy failures(&processor, &TextProcessor::processingFailed);
+        QSignalSpy batches(&processor, &TextProcessor::processedBatch);
+        processor.acceptFinal("First sentence.");
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, R"({"detail":"backend unavailable"})", false);
+        QTRY_COMPARE(failures.size(), 1);
+        processor.acceptFinal("Second sentence.");
+        QTRY_COMPARE(server.requests.size(), 2);
+        const auto request = QJsonDocument::fromJson(server.requests[1]->property("body").toByteArray()).object();
+        QCOMPARE(request.value("text").toString(), QString("First sentence. Second sentence."));
+        server.reply(1, R"({"result":"First sentence. Second sentence."})");
+        QTRY_COMPARE(batches.size(), 1);
+        QVERIFY(processor.pendingOriginal().isEmpty());
+        processor.acceptFinal("Third sentence.");
+        QTRY_COMPARE(server.requests.size(), 3);
+        server.reply(2, R"({"result":"Third sentence."})");
+        QTRY_COMPARE(batches.size(), 2);
+    }
+
     void generationLimitKeepsTheOriginalOutOfProcessedText() {
         TestServer server;
         ServiceClient client;
@@ -1758,14 +1898,18 @@ private slots:
         QVERIFY(failures[0][1].toString().contains("output limit"));
         QCOMPARE(batches.size(), 0);                         // never reported as translated
         QCOMPARE(processor.pendingOriginal(), original);     // kept for retry, review and copy
-        processor.acceptFinal("Next sentence.");             // later speech queues behind it
-        QTest::qWait(30);
-        QCOMPARE(server.requests.size(), 1);
         processor.finish();
         QCOMPARE(finished.size(), 1);
         QCOMPARE(tail.size(), 0);                            // not handed over as a final tail either
         QCOMPARE(batches.size(), 0);
-        QCOMPARE(processor.pendingOriginal(), original + " Next sentence.");
+        QCOMPARE(processor.pendingOriginal(), original);
+        processor.acceptFinal("Next sentence.");
+        QTRY_COMPARE(server.requests.size(), 2);
+        const auto retry = QJsonDocument::fromJson(server.requests[1]->property("body").toByteArray()).object();
+        QCOMPARE(retry.value("text").toString(), original + " Next sentence.");
+        server.reply(1, R"({"result":"A completed translation."})");
+        QTRY_COMPARE(batches.size(), 1);
+        QVERIFY(processor.pendingOriginal().isEmpty());
     }
 
     void processingModeFollowsTheSentenceLanguage() {
@@ -1816,7 +1960,7 @@ private slots:
         window.onFinalTranscript(original, 1, 0);
         QTRY_COMPARE(server.requests.size(), 1);
         server.reply(0, R"({"detail":"limit","reason":"generation_limit"})", false);
-        QTRY_VERIFY(window.processingLabel_->text().contains("Translation stopped"));
+        QTRY_VERIFY(window.processingLabel_->text().contains("Translation pending"));
         QVERIFY(window.expanded_);
         QCOMPARE(window.originalSoFar_, original);
         QVERIFY(window.processedSoFar_.isEmpty());           // automatic insertion sends only processed text

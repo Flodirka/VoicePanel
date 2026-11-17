@@ -277,10 +277,8 @@ class DirectLlm:
 
         prompt_n and cache_n come from llama-server's "timings": prompt tokens
         evaluated and prompt tokens reused from the KV cache."""
-        from voiceservice.api.text import default_max_tokens
-
         payload = {"messages": self.messages(text, mode, context, glossary), "stream": False,
-                   "max_tokens": default_max_tokens(text), **self.sampling}
+                   **self.sampling}
         try:
             resp = self.client.post("/v1/chat/completions", json=payload)
             resp.raise_for_status()

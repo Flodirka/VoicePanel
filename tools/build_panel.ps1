@@ -2,7 +2,8 @@
 param(
     [string]$QtDir = "runtime\Qt\6.8.3\msvc2022_64",
     [string]$BuildDir = "panel\build",
-    [switch]$SkipDeploy
+    [switch]$SkipDeploy,
+    [string]$Python = "python"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -70,6 +71,17 @@ if (-not $SkipDeploy) {
 }
 
 $ctest = Join-Path $qt "bin\ctest.exe"
+if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+    # Reuse the CPU runtime installed with the service. The C API preserves
+    # compatibility with the SDK headers used by the panel.
+    $ortRuntime = & $Python -c "from pathlib import Path; import onnxruntime; print(Path(onnxruntime.__file__).parent / 'capi')" 2>$null
+    if ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $ortRuntime 'onnxruntime.dll'))) {
+        foreach ($dll in @('onnxruntime.dll', 'onnxruntime_providers_shared.dll')) {
+            $source = Join-Path $ortRuntime $dll
+            if (Test-Path $source) { Copy-Item -LiteralPath $source -Destination (Join-Path $binDir $dll) -Force }
+        }
+    }
+}
 if (-not (Test-Path $ctest)) { $ctest = "ctest" }
 Write-Host "run the panel tests with: $ctest --test-dir $build --output-on-failure"
 

@@ -31,8 +31,7 @@ class LlamaBackend:
                 "--jinja",
                 "--parallel", "1",
             ]
-            if cfg.get("gpu_layers", 0) > 0:
-                args += ["-ngl", str(cfg["gpu_layers"])]
+            args += ["-ngl", str(cfg.get("gpu_layers", 0))]
             if cfg.get("flash_attn", True):
                 args += ["-fa", "auto"]
             args += self.memory_args(cfg)

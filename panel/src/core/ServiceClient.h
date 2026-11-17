@@ -2,6 +2,7 @@
 #include "core/SpellingChecker.h"
 #include <QByteArray>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QUrl>
@@ -54,7 +55,7 @@ public:
     // TTS -> WAV bytes
     void speech(const QString &text, const QString &model, const QString &voice, double speed,
                 std::function<void(bool ok, QByteArray wav, QString error)> cb,
-                const QString &language = {});
+                const QString &language = {}, const QString &instructions = {}, const QJsonObject &options = {});
 
 signals:
     void baseUrlChanged();

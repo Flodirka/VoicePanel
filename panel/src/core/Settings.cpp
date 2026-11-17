@@ -1,4 +1,5 @@
 #include "core/Settings.h"
+#include <QJsonDocument>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -66,6 +67,8 @@ void Settings::load() {
     if (ttsRussianVoice.isEmpty()) ttsRussianVoice = ttsVoiceProfile;
     if (ttsEnglishVoice.isEmpty()) ttsEnglishVoice = ttsVoiceProfile;
     ttsSpeed = s.value("ttsSpeed", ttsSpeed).toDouble();
+    ttsInstructions = s.value("ttsInstructions", ttsInstructions).toString();
+    ttsOptions = QJsonDocument::fromJson(s.value("ttsOptions").toByteArray()).object();
     ttsPauseMs = s.value("ttsPauseMs", ttsPauseMs).toInt();
     ttsEnabled = s.value("ttsEnabled", ttsEnabled).toBool();
 
@@ -126,6 +129,8 @@ void Settings::save() const {
     s.setValue("ttsRussianVoice", ttsRussianVoice);
     s.setValue("ttsEnglishVoice", ttsEnglishVoice);
     s.setValue("ttsSpeed", ttsSpeed);
+    s.setValue("ttsInstructions", ttsInstructions);
+    s.setValue("ttsOptions", QJsonDocument(ttsOptions).toJson(QJsonDocument::Compact));
     s.setValue("ttsPauseMs", ttsPauseMs);
     s.setValue("ttsEnabled", ttsEnabled);
 

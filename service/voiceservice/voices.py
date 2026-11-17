@@ -186,6 +186,8 @@ class VoiceStore:
             return False
         del manifest[voice_id]
         (self.dir / f"{voice_id}.wav").unlink(missing_ok=True)
+        (self.dir / f"{voice_id}.rvq").unlink(missing_ok=True)
+        (self.dir / f"{voice_id}.ref.txt").unlink(missing_ok=True)
         self._write_prompt_text(manifest)
         self._save_manifest(manifest)
         return True

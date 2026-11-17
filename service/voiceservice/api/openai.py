@@ -21,6 +21,7 @@ from .. import __version__
 from ..audio import decode_any_audio, read_wav_bytes, samples_to_wav, to_standard_wav
 from ..backends import Registry, has_cyrillic
 from ..processing import clean_transcript
+from ..tts import validate_speech_parameters
 from .deps import get_registry
 
 router = APIRouter()
@@ -190,11 +191,15 @@ async def speech(
         raise HTTPException(400, "input text is empty")
     voice = body.get("voice")
     requested_model = body.get("model")
+    if body.get("options") is not None and not isinstance(body["options"], dict):
+        raise HTTPException(400, "options must be an object")
+    options = dict(body.get("options") or {})
+    instructions = body.get("instructions") or options.get("instruct")
     # Server defaults apply only to automatic routing. Explicit models and
     # voices stay under the caller's control. The per-language default may be
     # a voice profile id or a built-in model id (e.g. piper-ru-female to pick
     # the female Russian voice over the male one).
-    if not voice and requested_model in (None, "", "default", "tts", "auto"):
+    if not voice and not instructions and requested_model in (None, "", "default", "tts", "auto"):
         lang = "ru" if has_cyrillic(text) else "en"
         default_voice = registry.cfg.get("tts", {}).get("default_voices", {}).get(lang) or None
         if default_voice:
@@ -207,7 +212,8 @@ async def speech(
     language = body.get("language")
     speed = body.get("speed")
     response_format = body.get("response_format", "wav")
-    options = dict(body.get("options") or {})
+    if instructions and requested_model in (None, "", "default", "tts", "auto"):
+        requested_model = registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8")
 
     # A named voice profile selects the cloning model and its reference.
     profile = None
@@ -218,7 +224,13 @@ async def speech(
         # no longer be served (e.g. an audio.cpp helper replaced by Omnivoice), so
         # resolve it to an engine the service actually knows instead of handing a
         # stale id to a backend that answers "unknown model".
-        model_id = registry.effective_profile_model(profile.get("model"))
+        try:
+            if requested_model in registry.tts_model_ids() and registry.tts_parameters(requested_model)["voice_cloning"]:
+                model_id = requested_model
+            else:
+                model_id = registry.effective_profile_model(profile.get("model"))
+        except KeyError as exc:
+            raise HTTPException(503, str(exc))
         voice = profile["id"]
         language = language or ("ru" if has_cyrillic(text) else "en")
     else:
@@ -230,7 +242,7 @@ async def speech(
         # profile. piper-ru handles everyday Russian; a cloned profile is
         # selected explicitly (voice=<profile-id>).
         clone_id = registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8")
-        if model_id == clone_id and not voice:
+        if model_id == clone_id and not voice and not instructions and not registry.tts_parameters(model_id)["instructions"]:
             raise HTTPException(
                 400,
                 f"{clone_id} is a cloning model and needs a voice profile: "
@@ -240,7 +252,14 @@ async def speech(
 
     # The generation cap applies to the audio-token clone engines only: the
     # VITS built-ins (Kokoro, Piper) reject unknown request options outright.
-    if profile is not None or model_id == registry.cfg.get("tts", {}).get("clone_model", "omnivoice-q8"):
+    params = registry.tts_parameters(model_id)
+    if voice and profile is None and registry.tts_backend_name(model_id) == "omnivoice":
+        raise HTTPException(400, f"unknown voice profile '{voice}'")
+    try:
+        speed, options = validate_speech_parameters(params, speed, instructions, options, voice)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc))
+    if "max_tokens" in params["options"]:
         options.setdefault("max_tokens", tts_max_tokens(text, body.get("max_tokens")))
 
     async with registry._tts_lock:
@@ -305,7 +324,8 @@ async def models(registry: Registry = Depends(get_registry)) -> dict[str, Any]:
     for mid in registry.asr_model_ids():
         data.append({"id": mid, "object": "model", "owned_by": "voice-service", "capability": "asr"})
     for mid in registry.tts_model_ids():
-        data.append({"id": mid, "object": "model", "owned_by": "voice-service", "capability": "tts"})
+        data.append({"id": mid, "object": "model", "owned_by": "voice-service", "capability": "tts",
+                     "engine": registry.tts_backend_name(mid), "speech_parameters": registry.tts_parameters(mid)})
     if registry.llm is not None:
         data.append({
             "id": registry.llm.model_alias,
@@ -313,4 +333,9 @@ async def models(registry: Registry = Depends(get_registry)) -> dict[str, Any]:
             "owned_by": "voice-service",
             "capability": "llm",
         })
-    return {"object": "list", "data": data}
+    aliases = {}
+    tts_cfg = registry.cfg.get("tts", {})
+    default = tts_cfg.get("default")
+    if default in registry.tts_model_ids() and not any(tts_cfg.get("default_voices", {}).values()):
+        aliases["auto"] = {"model": default, "speech_parameters": registry.tts_parameters(default)}
+    return {"object": "list", "data": data, "speech_aliases": aliases}

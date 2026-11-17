@@ -1,4 +1,5 @@
 #include "app/VoicePlaybackDialog.h"
+#include "app/VoiceDesignWidget.h"
 #include "app/PanelApp.h"
 #include "app/UiKit.h"
 #include "core/LiveSession.h"
@@ -14,8 +15,12 @@
 #include <QHBoxLayout>
 #include <QStandardPaths>
 #include <QLabel>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -69,6 +74,59 @@ VoicePlaybackDialog::VoicePlaybackDialog(PanelApp *app, QWidget *parent) : QDial
     text->setPlaceholderText(tr("Paste an agent reply, or dictate and review before speaking."));
     text->setPlainText(tr("This is a test of my selected voice."));
     layout->addWidget(text, 1);
+
+    auto *modelRow = new QHBoxLayout;
+    modelRow->addWidget(new QLabel(tr("Voice model")));
+    auto *modelBox = new QComboBox;
+    modelBox->setObjectName("speechModel");
+    modelBox->addItem(tr("Auto by language"), "auto");
+    modelBox->addItem(tr("Cloned voice"), "profile");
+    const QString currentModel = app_->settings()->ttsModel;
+    if (modelBox->findData(currentModel) < 0) modelBox->addItem(currentModel, currentModel);
+    modelBox->setCurrentIndex(qMax(0, modelBox->findData(currentModel)));
+    modelRow->addWidget(modelBox, 1);
+    layout->addLayout(modelRow);
+    auto *design = new VoiceDesignWidget;
+    design->setInstructions(app_->settings()->ttsInstructions);
+    design->setOptions(app_->settings()->ttsOptions);
+    design->setModel(currentModel);
+    layout->addWidget(design);
+    connect(modelBox, &QComboBox::currentIndexChanged, this, [this, modelBox, design] {
+        design->setModel(modelBox->currentData().toString());
+        app_->settings()->ttsModel = modelBox->currentData().toString();
+        app_->settings()->save();
+    });
+    connect(design, &VoiceDesignWidget::changed, this, [this, design] {
+        app_->settings()->ttsInstructions = design->savedInstructions();
+        app_->settings()->ttsOptions = design->savedOptions();
+        app_->settings()->save();
+    });
+    QPointer<VoicePlaybackDialog> self(this);
+    app_->service()->getJson("/v1/models", [self, modelBox, design](bool ok, QByteArray body, QString) {
+        if (!self || !ok) return;
+        const auto response = QJsonDocument::fromJson(body).object();
+        const auto models = response.value("data").toArray();
+        const QString selected = modelBox->currentData().toString();
+        const QSignalBlocker blocker(modelBox);
+        modelBox->clear();
+        modelBox->addItem(QObject::tr("Auto by language"), "auto");
+        modelBox->addItem(QObject::tr("Cloned voice"), "profile");
+        for (const auto &value : models) {
+            const auto model = value.toObject();
+            if (model.value("capability").toString() == "tts")
+                modelBox->addItem(model.value("id").toString() + " (" + model.value("engine").toString() + ")", model.value("id").toString());
+        }
+        modelBox->setCurrentIndex(qMax(0, modelBox->findData(selected)));
+        auto descriptors = models;
+        const auto aliases = response.value("speech_aliases").toObject();
+        for (auto it = aliases.begin(); it != aliases.end(); ++it) {
+            auto entry = it.value().toObject();
+            entry.insert("id", it.key());
+            descriptors.append(entry);
+        }
+        design->setModels(descriptors);
+        design->setModel(modelBox->currentData().toString());
+    });
 
     auto *status = new QLabel(tr("Ready"));
     status->setObjectName("speechStatus");
@@ -210,7 +268,7 @@ VoicePlaybackDialog::VoicePlaybackDialog(PanelApp *app, QWidget *parent) : QDial
                                          : QObject::tr("Translated into Russian"));
             });
     });
-    connect(save, &QPushButton::clicked, this, [this, text, status, save]() {
+    connect(save, &QPushButton::clicked, this, [this, text, status, save, design]() {
         if (text->toPlainText().trimmed().isEmpty()) return;
         auto *settings = app_->settings();
         const QString folder = settings->markdownDir.isEmpty()
@@ -223,6 +281,9 @@ VoicePlaybackDialog::VoicePlaybackDialog(PanelApp *app, QWidget *parent) : QDial
         if (path.isEmpty()) return;
         app_->tts()->stop();
         app_->tts()->setModel(settings->ttsModel);
+        app_->tts()->setInstructions(design->instructions());
+        app_->tts()->setSpeechParameters(design->parameters());
+        app_->tts()->setSpeechOptions(design->options());
         app_->tts()->setLanguageVoices(voiceId(settings->ttsRussianVoice), voiceId(settings->ttsEnglishVoice));
         app_->tts()->setSpeed(settings->ttsSpeed);
         save->setEnabled(false);
@@ -237,7 +298,7 @@ VoicePlaybackDialog::VoicePlaybackDialog(PanelApp *app, QWidget *parent) : QDial
         save->setEnabled(true);
         status->setText(message);
     });
-    connect(play, &QPushButton::clicked, this, [this, text, status, play, pause, outputBox]() {
+    connect(play, &QPushButton::clicked, this, [this, text, status, play, pause, outputBox, design]() {
         if (app_->tts()->speaking()) {
             app_->tts()->stop();
             return;
@@ -245,6 +306,9 @@ VoicePlaybackDialog::VoicePlaybackDialog(PanelApp *app, QWidget *parent) : QDial
         if (text->toPlainText().trimmed().isEmpty()) return;
         auto *settings = app_->settings();
         app_->tts()->setModel(settings->ttsModel);
+        app_->tts()->setInstructions(design->instructions());
+        app_->tts()->setSpeechParameters(design->parameters());
+        app_->tts()->setSpeechOptions(design->options());
         app_->tts()->setLanguageVoices(voiceId(settings->ttsRussianVoice),
                                        voiceId(settings->ttsEnglishVoice));
         app_->tts()->setSpeed(settings->ttsSpeed);

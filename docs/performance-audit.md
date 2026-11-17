@@ -365,6 +365,8 @@ Results are written to `runtime/logs/bench/`. Each file holds per-case outputs, 
 
 ### Generation cap
 
+Historical behavior below was removed in 0.2.0. The service no longer derives an output cap from input length. It uses the configured model's prompt contract; later speech retries queued failures without restarting capture. See [the current API contract](api.md#text-processing) and [0.2.0](releases/0.2.0.md).
+
 Method (measured in the container; tokenizer only, no model): the Qwen byte-level BPE vocabulary (`qwen.tiktoken`, 151,643 tokens, from the `dashscope` PyPI package; the Qwen2 and Qwen3 reports state that they reuse this base vocabulary, not re-verified here) with the Qwen2 pre-tokenizer pattern. Inputs: eight paired Russian/English technical sentences and paragraphs (48–341 characters) written for this check, plus one digit-heavy pair with ports, versions and an IP address.
 
 | Measure | Result |

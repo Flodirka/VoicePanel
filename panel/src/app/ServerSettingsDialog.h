@@ -7,6 +7,7 @@ class QComboBox;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
+class QGroupBox;
 class PanelTests;
 
 namespace VoicePanel {
@@ -44,5 +45,11 @@ private:
     QMap<QString, Row> rows_;
     QMap<QString, QString> serverDevices_;
     bool loading_ = false;
+    QGroupBox *enginesBox_ = nullptr;
+    QComboBox *asrEngine_ = nullptr;
+    QComboBox *ttsEngine_ = nullptr;
+    QMap<QString, QString> engineChoices_;
+    void loadEngines();
+    void saveEngines();
 };
 } // namespace VoicePanel

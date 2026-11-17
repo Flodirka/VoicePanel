@@ -4,7 +4,7 @@ VoicePanel is a source distribution for Windows 11 x64. Install the development 
 
 ## 1. Development tools
 
-Install Python 3.11 or 3.12, Git, Visual Studio 2022 with **Desktop development with C++**, CMake and Ninja. Install Qt **6.8.3**, target **msvc2022_64**, from the [official Qt installer](https://www.qt.io/download-qt-installer-oss). The build script expects it at `runtime/Qt/6.8.3/msvc2022_64`; its `-QtDir` option accepts another installation path.
+Install Python **3.12 x64**, Git, Visual Studio 2022 with **Desktop development with C++**, CMake and Ninja. The dependency lock targets Python 3.12 and includes wheel hashes for Windows and Linux service checks. Install Qt **6.8.3**, target **msvc2022_64**, from the [official Qt installer](https://www.qt.io/download-qt-installer-oss). The build script expects it at `runtime/Qt/6.8.3/msvc2022_64`; its `-QtDir` option accepts another installation path.
 
 ```powershell
 git clone https://github.com/Flodirka/VoicePanel.git
@@ -18,6 +18,7 @@ The Python dependencies, inference engines and model weights are separate third-
 
 ```powershell
 # Recognition, built-in speech, LLM, Whisper and engine variants:
+python tools/download_runtime.py --list
 python tools/download_runtime.py --group runtime
 
 # ONNX Runtime C++ SDK and Silero VAD:
@@ -29,10 +30,10 @@ python tools/download_runtime.py --group clone
 
 Downloads can be several gigabytes. The URLs and SHA-256 values are pinned in `tools/downloads.lock.json`. Model URLs use immutable repository revisions. Each file must match its locked hash before an archive is extracted. Cached files are verified too; a mismatch stops the process. Extraction rejects paths outside the destination and symlinks. The downloader does not bypass TLS checks, run downloaded binaries, or fetch a script and execute it.
 
-The `--verify-only` option checks files already present without downloading or extracting. The shell scripts remain compatibility entry points for the same verified Python downloader.
+Review the list before downloading. Repeat `--artifact NAME` to download only selected entries instead of a whole group. The `--verify-only` option checks files already present without downloading or extracting. The shell scripts remain compatibility entry points for the same verified Python downloader.
 
 The default **cloning engine** is not part of the locked downloads: it is the
-k2-fsa omnivoice.cpp engine built from source (see
+ServeurpersoCom/omnivoice.cpp engine built from source (see
 [Models](models.md#where-to-download)), driving the OmniVoice Q8 weights you
 download yourself from Hugging Face into `runtime/models/omnivoice/`
 (`omnivoice-base-Q8_0.gguf` + `omnivoice-tokenizer-Q8_0.gguf`, ~945 MB total,
@@ -57,7 +58,8 @@ backends:
       - runtime/bin/llama-cpu
     gpu_layers: 0
   omnivoice:
-    binary: runtime/bin/omnivoice-cpu/omnivoice-tts.exe
+    binary: runtime/bin/omnivoice-cpu/tts-server.exe
+    port: 8107
     codec_binary: runtime/bin/omnivoice-cpu/omnivoice-codec.exe
     backend: cpu
 ```
@@ -67,6 +69,15 @@ These are edits to the corresponding blocks, not a replacement for the full samp
 Kokoro may also need eSpeak NG on the system. The sample points to `runtime/third_party/espeak-ng/eSpeak NG/`; install it from [the upstream eSpeak NG project](https://github.com/espeak-ng/espeak-ng) or update `espeak_lib` and `espeak_data` to your installation. The downloader does not install eSpeak NG. Model and voice selection is described in [CPU and GPU configuration](compute-profiles.md).
 
 Optional cloned speech needs the cloning engine (omnivoice.cpp + the OmniVoice weights you download; see [Models](models.md)) and a reference recording you have the right to use. The CPU engine build works everywhere; the CUDA build is the real-time option and needs the cuBLAS/cudart runtime DLLs beside it. Keep personal references under the ignored runtime directory.
+
+Select installed backends before the first service start:
+
+```powershell
+python tools/configure_backends.py --config config.yaml --tts omnivoice --asr audiocpp
+# Alternative: --tts audiocpp --asr whisper
+```
+
+This saves choices in `runtime/state/engines.json`. OmniVoice selection uses one native model for ordinary speech, cloning and voice design. Audio.cpp selection uses the configured cloning helper when installed, or the installed built-in voices. It does not download missing models. The server tray's **Server settings → Choose backends** controls the same choices. Stop and start the service to apply them. CPU/GPU selection remains separate and follows the selected engine. See the [runtime update audit](runtime-update-2026-11-17.md) for the tested versions and limits.
 
 ## 4. Build and start
 
@@ -89,11 +100,11 @@ Check `http://127.0.0.1:8080/health` for service health. A healthy gateway does 
 ## 4a. Distributable bundle and in-workflow verification
 
 ```powershell
-.\tools\package_release.ps1 -CpuOnly                 # dist\VoicePanel, CPU-only engines and models
-.\tools\package_release.ps1 -Zip                     # also dist\VoicePanel-<version>.zip + .sha256
+.\tools\package_release.ps1 -CpuOnly -NoModels       # CPU runtime package without large model weights
+.\tools\package_release.ps1 -NoModels -Zip          # all installed engine variants, ZIP and SHA-256
 ```
 
-The bundle is one self-contained folder: `VoicePanel.exe` with the Qt runtime beside it, `service/`, `tools/`, `runtime/` (engine binaries, models, eSpeak/ONNX), `config.example.yaml`, and the licenses. Copy `config.example.yaml` to `config.yaml` and edit it inside the bundle.
+The bundle contains `VoicePanel.exe` with the Qt/ONNX runtime beside it, public source and documentation, engine binaries, eSpeak and licenses. It ships the example as `config.yaml`. Python 3.12 and service dependencies must be installed; `-NoModels` also requires installing the chosen weights separately. See [0.2.0 setup](releases/0.2.0.md#windows-package). Personal configuration and voice profiles stay outside public archives.
 
 Two checks run against the bundle as shipped:
 

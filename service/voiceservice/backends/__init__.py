@@ -9,9 +9,10 @@ from typing import Any
 
 from .. import compute
 from ..config import load_config
+from ..tts import speech_parameters
 from .audiocpp import AudioCppBackend
 from .llama import LlamaBackend
-from .omnivoice import OmnivoiceBackend
+from .omnivoice import OmnivoiceBackend, OmnivoiceHttpBackend, make_omnivoice_backend
 from .process import ManagedProcess
 from .whisper import WhisperBackend
 
@@ -55,15 +56,13 @@ class Registry:
                 self.audiocpp_diar = AudioCppBackend(diar_cfg, state_dir, log_dir)
             else:
                 log.warning("audiocpp_diar enabled but binary is missing (%s)", binary)
-        # Cloning engine (k2-fsa omnivoice.cpp): a piped CLI instead of an HTTP
-        # server, supervised by OmnivoiceBackend itself. The default clone
-        # model; audio.cpp's qwen3 helper above is the config-swap alternative.
+        # Native OmniVoice HTTP server, or the legacy CLI for older installs.
         self.omnivoice: OmnivoiceBackend | None = None
         ov_cfg = bcfg.get("omnivoice") or {}
         if ov_cfg.get("enabled", False):
             binary = Path(str(ov_cfg.get("binary", "")))
             if binary.is_file():
-                self.omnivoice = OmnivoiceBackend(ov_cfg, log_dir)
+                self.omnivoice = make_omnivoice_backend(ov_cfg, log_dir)
             else:
                 log.warning(
                     "omnivoice enabled but binary is missing (%s); "
@@ -81,8 +80,7 @@ class Registry:
             self.llama = LlamaBackend(llama_cfg, log_dir)
         # Optional dedicated translation model (e.g. Hy-MT2-1.8B): translation
         # modes route to it when configured, correction stays on `llama`.
-        # Its device is fixed by its own config; compute switching does not
-        # cover it (it is not one of compute.GROUPS).
+        # It follows the same compute group as correction.
         self.llm_translate: LlamaBackend | None = None
         tr_cfg = bcfg.get("llama_translate") or {}
         if tr_cfg.get("enabled", True) and (tr_cfg.get("model_path") or tr_cfg.get("external")):
@@ -148,6 +146,12 @@ class Registry:
             return "omnivoice"
         return "audiocpp_clone" if backend is self.audiocpp_clone else "audiocpp"
 
+    def tts_parameters(self, model_id: str) -> dict[str, Any]:
+        params = speech_parameters(self.tts_backend_name(model_id), self._tts_model(model_id) or {})
+        if isinstance(self.tts_backend(model_id), OmnivoiceHttpBackend):
+            params["options"] = ["seed"]  # The upstream HTTP API fixes the decoder at 32 steps.
+        return params
+
     def effective_profile_model(self, stored: str | None) -> str:
         """The engine a stored voice profile actually runs on.
 
@@ -159,7 +163,7 @@ class Registry:
         engine (then the TTS default, then any known TTS model) so legacy
         profiles keep working after a config change.
         """
-        known = self.tts_model_ids()
+        known = [mid for mid in self.tts_model_ids() if self.tts_parameters(mid)["voice_cloning"]]
         candidate = (stored or "").strip()
         if candidate in known:
             return candidate
@@ -170,7 +174,9 @@ class Registry:
         ):
             if fallback and fallback in known:
                 return fallback
-        return known[0] if known else candidate
+        if known:
+            return known[0]
+        raise KeyError("no voice-cloning model is available; select and install a cloning backend")
 
     def diar_model_ids(self) -> list[str]:
         """Diarisation models, from their own process or the main one."""
@@ -283,8 +289,8 @@ class Registry:
     def backend_process(self, group: str) -> ManagedProcess | None:
         """The supervised HTTP process behind a compute group (see compute.GROUPS).
 
-        The omnivoice group is a piped CLI without a ManagedProcess; its busy
-        state is checked directly in busy_reason.
+        The legacy omnivoice CLI has no ManagedProcess; its busy state is
+        checked directly in busy_reason.
         """
         if group == "llm":
             return self.llama.proc if self.llama else None
@@ -292,12 +298,22 @@ class Registry:
             return self.audiocpp.proc
         if group == "diar":
             return self.audiocpp_diar.proc if self.audiocpp_diar else None
+        if group == "clone":
+            backend = getattr(self, compute.clone_section(self.cfg), None)
+            return backend.proc if isinstance(backend, (AudioCppBackend, OmnivoiceHttpBackend)) else None
         return None
 
     def busy_reason(self, group: str) -> str | None:
-        if group == "clone" and self.omnivoice is not None:
-            if self.omnivoice.status()["leases"] > 0:
+        if group == "llm" and self.llm_translate is not None:
+            status = self.llm_translate.proc.status()
+            if status["leases"] > 0 or status["adopted"]:
+                return "llm: translation process is busy or managed externally"
+        if group == "clone" and compute.clone_section(self.cfg) == "omnivoice" and self.omnivoice is not None:
+            status = self.omnivoice.status()
+            if status["leases"] > 0:
                 return "clone: a request is in progress"
+            if status["adopted"]:
+                return "clone: the process was started outside the service"
             return None
         proc = self.backend_process(group)
         if proc is None:
@@ -329,12 +345,14 @@ class Registry:
         if reasons:
             raise ComputeBusy("; ".join(reasons))
         for group in changes:
-            if group == "clone" and self.omnivoice is not None:
+            if group == "clone" and compute.clone_section(self.cfg) == "omnivoice" and self.omnivoice is not None:
                 await self.omnivoice.stop()
             else:
                 proc = self.backend_process(group)
                 if proc is not None:
                     await proc.stop()
+                if group == "llm" and self.llm_translate is not None:
+                    await self.llm_translate.stop()
         compute.apply_to_config(self.cfg, changes)
         compute.save_overrides(self.cfg["_root"], changes)
         for group in changes:
@@ -346,8 +364,14 @@ class Registry:
         if group == "main":
             self.audiocpp = AudioCppBackend(bcfg["audiocpp"], self.state_dir, self.log_dir)
         elif group == "clone":
-            self.omnivoice = OmnivoiceBackend(bcfg["omnivoice"], self.log_dir)
+            key = compute.clone_section(self.cfg)
+            if key == "omnivoice":
+                self.omnivoice = make_omnivoice_backend(bcfg[key], self.log_dir)
+            else:
+                setattr(self, key, AudioCppBackend(bcfg[key], self.state_dir, self.log_dir))
         elif group == "diar":
             self.audiocpp_diar = AudioCppBackend(bcfg["audiocpp_diar"], self.state_dir, self.log_dir)
         else:
             self.llama = LlamaBackend(bcfg["llama"], self.log_dir)
+            if self.llm_translate is not None:
+                self.llm_translate = LlamaBackend(bcfg["llama_translate"], self.log_dir)

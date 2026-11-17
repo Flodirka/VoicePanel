@@ -151,7 +151,7 @@ def test_chain_suite_reports_request_level_names_and_failures(live_service, tmp_
     assert ok["asr_plus_text_request_ms"] == pytest.approx(ok["asr_request_ms"] + ok["text_request_ms"], abs=0.2)
     assert ok["estimated_speech_end_to_text_ms"] == pytest.approx(
         run_bench.estimate_speech_end_to_text_ms(ok["asr_request_ms"], ok["text_request_ms"], 24), abs=0.2)
-    assert failed["reason"] == "generation_limit" and failed["status"] == 502
+    assert failed["reason"] == "incomplete_generation" and failed["status"] == 502
     assert "estimated_speech_end_to_text_ms" not in failed     # failures never enter latency figures
     assert result["asr_plus_text_request_ms"]["n"] == 1
 

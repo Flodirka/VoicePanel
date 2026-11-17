@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -16,6 +17,31 @@ from .process import Lease, ManagedProcess
 # arrives during such a transition can fail once with a 5xx even though the
 # retry succeeds, so every inference call retries a single time on 5xx.
 _RETRY_STATUS = {500, 502, 503, 504}
+
+
+async def _response_chunks(reader: asyncio.StreamReader, headers: dict[str, str]):
+    """Read the native server's HTTP/1.1 response framing."""
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        while True:
+            size = int((await reader.readline()).split(b";", 1)[0], 16)
+            if size == 0:
+                return
+            remaining = size
+            while remaining:
+                data = await reader.readexactly(min(remaining, 65536))
+                remaining -= len(data)
+                yield data
+            if await reader.readexactly(2) != b"\r\n":
+                raise RuntimeError("invalid streaming response chunk")
+    elif "content-length" in headers:
+        remaining = int(headers["content-length"])
+        while remaining:
+            data = await reader.readexactly(min(remaining, 65536))
+            remaining -= len(data)
+            yield data
+    else:
+        while data := await reader.read(65536):
+            yield data
 
 
 async def _post_with_retry(
@@ -221,21 +247,71 @@ class AudioCppBackend:
         if language and self.supports_language(model):
             params["language"] = language
         async with self.proc.lease():
-            client = self.proc.http()
-            async with client.stream(
-                "POST",
-                f"{self.proc.base_url}/v1/audio/transcriptions/live",
-                params=params,
-                content=pcm_chunks,
-                headers={"Content-Type": "application/octet-stream"},
-                timeout=timeout,
-            ) as resp:
-                if resp.status_code != 200:
-                    body = (await resp.aread())[:400].decode("utf-8", "replace")
-                    raise RuntimeError(f"live transcription failed ({resp.status_code}): {body}")
-                async for line in resp.aiter_lines():
-                    if line:
-                        yield line
+            # HTTPX sends the complete body before reading a response. Live
+            # sessions need both directions concurrently, including before EOF.
+            try:
+                async with asyncio.timeout(timeout):
+                    reader, writer = await asyncio.open_connection(self.proc.host, self.proc.port)
+                    path = "/v1/audio/transcriptions/live?" + urlencode(params)
+                    writer.write((
+                        f"POST {path} HTTP/1.1\r\nHost: {self.proc.host}:{self.proc.port}\r\n"
+                        "Content-Type: application/octet-stream\r\nAccept: text/event-stream\r\n"
+                        "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    ).encode("ascii"))
+
+                    async def upload():
+                        try:
+                            async for chunk in pcm_chunks:
+                                if chunk:
+                                    writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                                    await writer.drain()
+                            writer.write(b"0\r\n\r\n")
+                            await writer.drain()
+                        except BaseException:
+                            writer.close()
+                            raise
+
+                    sender = asyncio.create_task(upload())
+                    try:
+                        status_line = await reader.readline()
+                        if not status_line.startswith(b"HTTP/1."):
+                            raise RuntimeError("engine closed the streaming connection")
+                        status = int(status_line.split(b" ", 2)[1])
+                        headers = {}
+                        while True:
+                            line = await reader.readline()
+                            if line == b"\r\n":
+                                break
+                            if not line:
+                                raise RuntimeError("engine closed the streaming headers")
+                            key, _, value = line.decode("latin1").partition(":")
+                            headers[key.lower()] = value.strip()
+                        pending = b""
+                        async for chunk in _response_chunks(reader, headers):
+                            pending += chunk
+                            if status != 200:
+                                raise RuntimeError(f"live transcription failed ({status}): {pending[:400].decode('utf-8', 'replace')}")
+                            while b"\n" in pending:
+                                line, pending = pending.split(b"\n", 1)
+                                if line.strip():
+                                    yield line.rstrip(b"\r").decode("utf-8", "replace")
+                        if status != 200:
+                            raise RuntimeError(f"live transcription failed ({status})")
+                        if pending.strip():
+                            yield pending.decode("utf-8", "replace")
+                        await sender
+                    finally:
+                        sender.cancel()
+                        await asyncio.gather(sender, return_exceptions=True)
+                        writer.close()
+                        try:
+                            await writer.wait_closed()
+                        except ConnectionError:
+                            pass
+            except TimeoutError as exc:
+                raise RuntimeError("live transcription timed out") from exc
+            except ConnectionError as exc:
+                raise RuntimeError("live transcription failed: engine connection closed") from exc
 
     # ------------------------------------------------------------------ TTS
     async def speech(

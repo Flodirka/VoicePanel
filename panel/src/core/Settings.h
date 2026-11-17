@@ -1,5 +1,6 @@
 #pragma once
 #include <QSettings>
+#include <QJsonObject>
 #include <QString>
 
 namespace VoicePanel {
@@ -57,6 +58,8 @@ struct Settings {
     QString ttsRussianVoice;           // "builtin" | profile id
     QString ttsEnglishVoice;           // "builtin" | profile id
     double ttsSpeed = 1.0;
+    QString ttsInstructions;
+    QJsonObject ttsOptions;
     int ttsPauseMs = 0;                // silence added between spoken sentences
     bool ttsEnabled = false;
 

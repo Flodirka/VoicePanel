@@ -26,7 +26,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Windows-11_x64-23074B?style=flat-square" alt="Windows 11 x64">
   <img src="https://img.shields.io/badge/C%2B%2B-20-23074B?style=flat-square" alt="C++20">
-  <img src="https://img.shields.io/badge/Python-3.11--3.12-23074B?style=flat-square" alt="Python 3.11 and 3.12">
+  <img src="https://img.shields.io/badge/Python-3.12-23074B?style=flat-square" alt="Python 3.12">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-EE9A3A?style=flat-square" alt="MIT license for original code"></a>
 </p>
 
@@ -63,7 +63,7 @@ _Actual Qt widgets with sample text. The toolbar and Preview remain frameless._
 
 The public repository contains source code. Models, inference engines, Qt, ONNX Runtime and private voice samples are separate downloads. It is not a self-contained Windows installer.
 
-**Desktop requirements:** Windows 11 x64, Python 3.11–3.12, Visual Studio 2022 with Desktop development with C++, CMake/Ninja, Qt 6.8.3 for MSVC 2022, ONNX Runtime 1.20.1 and the Silero VAD model. Recognition and text processing also need the selected engines and model files.
+**Desktop requirements:** Windows 11 x64, Python 3.12 x64, Visual Studio 2022 with Desktop development with C++, CMake/Ninja, Qt 6.8.3 for MSVC 2022, ONNX Runtime and the Silero VAD model. The panel builds against the pinned ONNX 1.20.1 SDK and deploys the service's compatible 1.32.0 runtime. Recognition and text processing also need the selected engines and model files.
 
 1. Clone the repository and prepare the dependencies and runtime files described in [Getting started](docs/getting-started.md).
 2. Copy the sample configuration and select the model and engine paths you installed.
@@ -76,6 +76,7 @@ python -m pip install --only-binary=:all: --require-hashes -r service/requiremen
 Copy-Item config.example.yaml config.yaml
 
 # After preparing Qt, ONNX Runtime, engines and models:
+python tools/configure_backends.py --tts omnivoice --asr audiocpp
 .\tools\build_panel.ps1
 .\tools\start-service.ps1
 .\tools\start-panel.ps1
@@ -86,7 +87,9 @@ the omnivoice.cpp engine (OmniVoice 0.6B Q8_0, ~945 MB, 600+ languages); the
 panel's compute switch can place it, recognition and text processing on CUDA —
 that is the real-time mode for calls and the live interpreter. The
 sample configuration keeps the larger `qwen3-tts-clone` (audio.cpp, GPU
-helper) as a documented alternative. See [CPU and GPU configuration](docs/compute-profiles.md).
+helper) as a selectable alternative. **Server settings → Choose backends** saves
+TTS and ASR choices for the next service start. CPU/GPU controls follow the
+selected engines. Selection does not download models. See [CPU and GPU configuration](docs/compute-profiles.md).
 
 ## Models
 
@@ -98,7 +101,7 @@ per-slot swap instructions live in [Models](docs/models.md). Summary:
 |---|---|---|---|
 | Recognition | `nemotron-3.5-asr-streaming-0.6b` Q8_0 (RTF 0.41–0.46 CPU) | 931 MB | whisper small/large (timestamps) |
 | Built-in voices | Piper `ruslan` (male) / `irina` (female) for Russian, Kokoro for English | 62–190 MB | any GGUF Piper voice |
-| Cloned voice | OmniVoice 0.6B Q8_0 via omnivoice.cpp — RTF 1.9–6.9 on a (busy) RTX 4060, 13–24 on CPU | 945 MB | qwen3-tts-clone (2 GB, ru/en, GPU helper) |
+| Cloned or designed voice | OmniVoice 0.6B Q8_0 via native omnivoice.cpp HTTP server | 945 MB in two files | qwen3-tts-clone (2 GB, 10 languages including ru/en, audio.cpp helper) |
 | Correction | Qwen3.5-0.8B-GEC Q4_0 (skips clean sentences) | 563 MB | any instruct LLM llama.cpp serves |
 | Translation | PLaMo 3 Translate 0.8B Q4_K_M | 573 MB | Hy-MT2-1.8B (Apache-2.0) |
 | Speaker separation | nemotron-3-diarization Q8_0 | 107 MB | — |
@@ -106,6 +109,29 @@ per-slot swap instructions live in [Models](docs/models.md). Summary:
 Bigger models work the same way: a slot takes whatever GGUF its engine loads.
 Note the license terms — OmniVoice weights are CC-BY-NC 4.0, so they are a
 download, never a bundled artifact.
+
+The [2026-11-17 runtime audit](docs/runtime-update-2026-11-17.md) records the
+updated audio.cpp **0.9.5**, llama.cpp **1.0 / b12359** and native OmniVoice
+build **a650381**. Its short GPU test produced 2.04 s of warm cloned speech
+in 1.30 s and 2.08 s of designed speech in 0.59 s. Steady process RSS rose
+from about 573 MiB on **7bea72f** to 693 MiB; this increase repeated across
+alternating runs. The new version passed the RU/EN text-completeness check.
+Its VRAM comparison was inconclusive because background GPU use changed.
+
+In the earlier comparison on the RTX 4060 Laptop, **7bea72f** produced 2.04 s of warm
+cloned speech in 1.42 s and 2.08 s of designed speech in 0.56–0.58 s, at 32
+steps. Incremental steady VRAM was about 1.1 GiB, against 2.0 GiB for the
+audio.cpp packed OmniVoice model in the same short test. The native path keeps
+the existing 945 MB weights and one loaded model across voice and language
+changes. These are sample measurements, not peak-memory or call-quality guarantees.
+Earlier model-table measurements remain in [Models](docs/models.md).
+
+Version 0.2.0 also fixes recovery of continuous dictation and uses the default GEC model's trained prompt without an automatic output-token cap. See [release setup and known limitations](docs/releases/0.2.0.md).
+
+Voice design controls appear for supported models in Settings and Voice
+playback. The API reports the accepted attributes and generation options per
+model. A saved clone is reference data; its TTS model is still required for
+each synthesis. Qwen and OmniVoice keep their own conditioning caches.
 
 ## Local speech API
 
@@ -182,7 +208,7 @@ See [Contributing](CONTRIBUTING.md) for development scope and verification expec
 
 ## Credits and license
 
-VoicePanel builds on [audio.cpp](https://github.com/0xShug0/audio.cpp), the [OmniVoice](https://github.com/k2-fsa/OmniVoice) engine (omnivoice.cpp, built from source), [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [Silero VAD](https://github.com/snakers4/silero-vad), Qt and ONNX Runtime. Its continuous voice workflow and speech pipeline were informed by [Pithagoras](https://github.com/thecodacus/pithagoras).
+VoicePanel builds on [audio.cpp](https://github.com/0xShug0/audio.cpp), the [OmniVoice](https://github.com/k2-fsa/OmniVoice) model through [omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp), [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [Silero VAD](https://github.com/snakers4/silero-vad), Qt and ONNX Runtime. Its continuous voice workflow and speech pipeline were informed by [Pithagoras](https://github.com/thecodacus/pithagoras).
 
 Original VoicePanel code is licensed under [MIT](LICENSE). Attributed adaptations, fonts, icons, engines and model weights retain their own terms. Read [Third-party notices](THIRD_PARTY_NOTICES.md). Runtime binaries and model weights are not included in this repository.
 
