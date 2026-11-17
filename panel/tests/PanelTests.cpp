@@ -693,7 +693,7 @@ private slots:
         QVERIFY(wav.startsWith("RIFF"));
         QVERIFY(wav.mid(36, 4) == "data");
         app_->settings()->autoCleanEditor = true;
-        app_->service()->setBaseUrl("http://127.0.0.1:8080");
+        app_->service()->setBaseUrl(qEnvironmentVariable("VOICEPANEL_TEST_SERVICE_URL", "http://127.0.0.1:8080"));
         MainWindow window(app_);
         bool asrReady = false, llmReady = false;
         app_->service()->transcribe(wav, "default", "auto", [&asrReady](bool ok, QString, QString) { asrReady = ok; });
@@ -1493,12 +1493,17 @@ private slots:
     void gripDoubleClickSnapsToEveryNearestEdge() {
         MainWindow window(app_);
         window.show();
+        window.setDockPosition("free");
+        QCoreApplication::processEvents();
         const QRect area = window.screen()->availableGeometry();
+        const QSize panelSize = window.size();
+        const int centeredX = area.center().x() - panelSize.width() / 2;
+        const int centeredY = area.center().y() - panelSize.height() / 2;
         const QList<QPair<QString, QPoint>> locations{
-            {"left", QPoint(area.left() + 15, area.center().y())},
-            {"right", QPoint(area.right() - 655, area.center().y())},
-            {"top", QPoint(area.center().x() - 320, area.top() + 15)},
-            {"bottom", QPoint(area.center().x() - 320, area.bottom() - 70)}};
+            {"left", QPoint(area.left() + 15, centeredY)},
+            {"right", QPoint(area.right() - panelSize.width() + 1 - 15, centeredY)},
+            {"top", QPoint(centeredX, area.top() + 15)},
+            {"bottom", QPoint(centeredX, area.bottom() - panelSize.height() + 1 - 15)}};
         for (const auto &[edge, point] : locations) {
             window.setDockPosition("free");
             window.move(point);

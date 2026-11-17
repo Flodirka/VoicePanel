@@ -128,12 +128,12 @@ $size = (Get-ChildItem $bundle -Recurse -File -ErrorAction SilentlyContinue | Me
 Write-Host ("bundle ready: " + $bundle + "  (" + [math]::Round($size / 1MB, 1) + " MB)")
 
 if ($Zip) {
-    $zip = Join-Path $root (Join-Path $Out "VoicePanel-$version.zip")
-    if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
-    Compress-Archive -Path $bundle -DestinationPath $zip -CompressionLevel Optimal
-    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
-    "$hash  $($zip | Split-Path -Leaf)" | Set-Content -Path "$zip.sha256" -Encoding ASCII
-    Write-Host "zip: $zip"
-    Write-Host "sha256: $hash  (written to $zip.sha256)"
+    $zipPath = Join-Path $root (Join-Path $Out "VoicePanel-$version.zip")
+    if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+    Compress-Archive -Path $bundle -DestinationPath $zipPath -CompressionLevel Optimal
+    $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
+    "$hash  $($zipPath | Split-Path -Leaf)" | Set-Content -Path "$zipPath.sha256" -Encoding ASCII
+    Write-Host "zip: $zipPath"
+    Write-Host "sha256: $hash  (written to $zipPath.sha256)"
 }
 exit 0

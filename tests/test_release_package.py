@@ -33,7 +33,7 @@ def test_package_only_copies_public_source_and_deployed_runtime(tmp_path: Path):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("local-only", encoding="utf-8")
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-File", str(script), "-CpuOnly", "-NoModels"],
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-File", str(script), "-CpuOnly", "-NoModels", "-Zip"],
                             capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stderr
     bundle = tmp_path / "dist/VoicePanel"
@@ -42,6 +42,8 @@ def test_package_only_copies_public_source_and_deployed_runtime(tmp_path: Path):
         assert not (bundle / name).exists(), name
     expected = files["config.example.yaml"].replace("llama-vulkan", "llama-cpu")
     assert (bundle / "config.yaml").read_text(encoding="utf-8-sig") == expected
+    assert (tmp_path / "dist/VoicePanel-0.2.0.zip").is_file()
+    assert (tmp_path / "dist/VoicePanel-0.2.0.zip.sha256").is_file()
 
 
 def test_panel_launcher_finds_the_executable_at_the_package_root(tmp_path: Path):
