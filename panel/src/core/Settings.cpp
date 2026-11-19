@@ -9,6 +9,10 @@
 
 namespace VoicePanel {
 
+QString normalizeVoiceSelection(const QString &saved) {
+    return saved == QLatin1String("builtin") ? QString() : saved;
+}
+
 QString Settings::transcriptDirectory() const {
     if (!markdownDir.isEmpty() || !autoSaveSessions) return markdownDir;
     return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/transcripts";
@@ -33,7 +37,6 @@ void Settings::load() {
     meetingLanguage = s.value("meetingLanguage", meetingLanguage).toInt();
     liveOutgoing = s.value("liveOutgoing", liveOutgoing).toInt();
     callLanguage = s.value("callLanguage", callLanguage).toInt();
-    speakCaptions = s.value("speakCaptions", speakCaptions).toBool();
     subtitlesLanguage = s.value("subtitlesLanguage", subtitlesLanguage).toInt();
     language = "auto";
     inputDevice = s.value("inputDevice", inputDevice).toString();
@@ -62,8 +65,10 @@ void Settings::load() {
     ttsVoiceProfile = s.value("ttsVoiceProfile", ttsVoiceProfile).toString();
     ttsRussianVoice = s.value("ttsRussianVoice", ttsVoiceProfile).toString();
     ttsEnglishVoice = s.value("ttsEnglishVoice", ttsVoiceProfile).toString();
-    // An empty entry is a preference saved before a voice was recorded, not a
-    // choice of the built-in voice ("builtin" is that choice): use the profile.
+    ttsRussianVoice = normalizeVoiceSelection(ttsRussianVoice);
+    ttsEnglishVoice = normalizeVoiceSelection(ttsEnglishVoice);
+    // An empty entry is a preference saved before a voice was recorded: use the
+    // saved profile rather than silently dropping back to the engine's voice.
     if (ttsRussianVoice.isEmpty()) ttsRussianVoice = ttsVoiceProfile;
     if (ttsEnglishVoice.isEmpty()) ttsEnglishVoice = ttsVoiceProfile;
     ttsSpeed = s.value("ttsSpeed", ttsSpeed).toDouble();
@@ -99,7 +104,6 @@ void Settings::save() const {
     s.setValue("meetingLanguage", meetingLanguage);
     s.setValue("liveOutgoing", liveOutgoing);
     s.setValue("callLanguage", callLanguage);
-    s.setValue("speakCaptions", speakCaptions);
     s.setValue("subtitlesLanguage", subtitlesLanguage);
     s.setValue("language", language);
     s.setValue("inputDevice", inputDevice);

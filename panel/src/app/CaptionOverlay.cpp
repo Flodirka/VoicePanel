@@ -8,7 +8,6 @@
 #include "core/Settings.h"
 #include "core/TtsPlayer.h"
 
-#include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -160,9 +159,9 @@ void CaptionOverlay::buildSettings() {
     size_->addItem(tr("L"), int(2));
     form->addRow(tr("Text size"), size_);
 
-    voice_ = new QCheckBox(tr("Speak the translation"));
-    voice_->setToolTip(tr("Speak the translation with the selected voice"));
-    form->addRow(QString(), voice_);
+    // Caption voicing is deferred: the voice would be captured again by the
+    // same loopback the captions translate from, so it waits for a playback
+    // route that excludes our own output. Subtitles stay text-only.
 
     connect(settingsButton_, &QPushButton::clicked, this, [this] { settings_->openAt(); });
     connect(source_, &QComboBox::currentIndexChanged, this, [this] {
@@ -181,12 +180,6 @@ void CaptionOverlay::buildSettings() {
         app_->settings()->subtitlesTextSize = size_->currentData().toInt();
         app_->settings()->save();
         applyTextSize();
-    });
-    connect(voice_, &QCheckBox::toggled, this, [this](bool on) {
-        if (loading_) return;
-        app_->settings()->speakCaptions = on;
-        app_->settings()->save();
-        controller_->setSpeakCaptions(on);
     });
 }
 
@@ -258,7 +251,6 @@ void CaptionOverlay::refreshSources() {
     direction_->setCurrentIndex(direction_->findData(s->subtitlesLanguage));
     display_->setCurrentIndex(display_->findData(s->subtitlesDisplay));
     size_->setCurrentIndex(size_->findData(s->subtitlesTextSize));
-    voice_->setChecked(s->speakCaptions);
     loading_ = false;
 }
 
@@ -268,7 +260,6 @@ void CaptionOverlay::applySettings() {
     s->systemAudioDevice = source.startsWith(QLatin1String("pid:")) ? source
                                                                    : source.mid(4);
     s->subtitlesLanguage = direction_->currentData().toInt();
-    s->speakCaptions = voice_->isChecked();
     s->save();
 }
 
@@ -287,7 +278,6 @@ void CaptionOverlay::begin() {
 
     controller_->configure(*app_->settings(), SessionController::Mode::Subtitles);
     controller_->setDirection(direction_->currentData().toInt());
-    controller_->setSpeakCaptions(voice_->isChecked());
     QString vadPath = app_->vadPath();
     if (vadPath.isEmpty()) vadPath = app_->settings()->vadModel;
     if (vadPath.isEmpty()) vadPath = QStringLiteral("models/silero_vad.onnx");

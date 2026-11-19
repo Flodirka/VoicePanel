@@ -667,7 +667,11 @@ void SettingsDialog::refreshVoices() {
     const auto populate = [this](QComboBox *combo, const QString &selected) {
         const QSignalBlocker blocker(combo);
         combo->clear();
-        combo->addItem(tr("Model default (no voice profile)"), "builtin");
+        // There is no separate built-in voice toggle: the engine comes from the
+        // model row, and this row only overrides the voice profile. An empty id
+        // means the saved profile, and the model's own voice when there is none.
+        combo->addItem(tr("My saved voice"), QString());
+        combo->setToolTip(tr("The voice profile saved above. Without one, the model's own voice is used."));
         for (const auto &voice : app_->voices()->profiles()) combo->addItem(voice.name, voice.id);
         if (!selected.isEmpty() && combo->findData(selected) < 0)
             combo->addItem(tr("Saved voice (currently unavailable)"), selected);

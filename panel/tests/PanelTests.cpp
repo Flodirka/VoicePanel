@@ -1778,6 +1778,101 @@ private slots:
         control.stop();
     }
 
+    void liveAnswerSpeaksTheSavedCloneInsteadOfTheBuiltinVoice() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        TtsPlayer tts(&client);
+        SessionController control(&client, &tts);
+        // Empty rows are what Settings::load leaves behind for a row the user
+        // never chose; they used to reach the service as no voice at all, so the
+        // call heard the built-in Piper voice instead of the saved clone.
+        Settings settings;
+        settings.ttsVoiceProfile = QStringLiteral("my-voice");
+        control.configure(settings, SessionController::Mode::Interpreter);
+        control.running_ = true;
+        control.setOutgoing(SessionController::Outgoing::Translated);
+
+        QVector<float> samples(8000, 0.05f);
+        control.onUtterance(false, samples, 1.0);      // the microphone is the outgoing side
+        QTRY_COMPARE(server.requests.size(), 1);
+        server.reply(0, R"({"text":"privet"})");
+        QTRY_COMPARE(server.requests.size(), 2);
+        server.reply(1, R"({"result":"hello"})");
+        QTRY_COMPARE(server.requests.size(), 3);
+        const auto payload =
+            QJsonDocument::fromJson(server.requests[2]->property("body").toByteArray()).object();
+        QCOMPARE(payload.value("voice").toString(), QStringLiteral("my-voice"));
+        QCOMPARE(payload.value("model").toString(), QStringLiteral("auto"));
+        tts.stop();
+        server.reply(2, "cancelled");
+        control.stop();
+    }
+
+    void retiredBuiltinVoiceRowMeansTheSavedVoice() {
+        QCOMPARE(normalizeVoiceSelection(QStringLiteral("builtin")), QString());
+        QCOMPARE(normalizeVoiceSelection(QString()), QString());
+        QCOMPARE(normalizeVoiceSelection(QStringLiteral("my-voice")), QStringLiteral("my-voice"));
+        QCOMPARE(SessionController::sessionVoice(Settings{}, QString()), QString());
+        Settings saved;
+        saved.ttsVoiceProfile = QStringLiteral("my-voice");
+        QCOMPARE(SessionController::sessionVoice(saved, QString()), QStringLiteral("my-voice"));
+        QCOMPARE(SessionController::sessionVoice(saved, QStringLiteral("other")), QStringLiteral("other"));
+    }
+
+    // Opt-in against a running service (VOICEPANEL_LIVE_TTS_URL, VOICEPANEL_LIVE_VOICE):
+    // the answer the interpreter speaks must be synthesised by the saved profile,
+    // not by the small built-in Russian voice.
+    void liveInterpreterAnswerUsesTheSavedProfile() {
+        const QString url = qEnvironmentVariable("VOICEPANEL_LIVE_TTS_URL");
+        if (url.isEmpty()) QSKIP("Opt-in live TTS check");
+        const QString profile = qEnvironmentVariable("VOICEPANEL_LIVE_VOICE");
+        QVERIFY(!profile.isEmpty());
+
+        ServiceClient client;
+        client.setBaseUrl(url);
+        TtsPlayer tts(&client);
+        SessionController control(&client, &tts);
+        Settings settings;
+        settings.ttsModel = QStringLiteral("auto");
+        settings.ttsVoiceProfile = profile;
+        control.configure(settings, SessionController::Mode::Interpreter);
+
+        const auto rateOf = [](const QByteArray &wav) {
+            return int(quint8(wav[24])) | int(quint8(wav[25])) << 8
+                | int(quint8(wav[26])) << 16 | int(quint8(wav[27])) << 24;
+        };
+        const auto synthesize = [&tts, &rateOf](const QString &suffix) {
+            const QString path = QDir::temp().filePath(
+                QStringLiteral("voicepanel-live-answer-%1.wav").arg(suffix));
+            QFile::remove(path);
+            QSignalSpy saved(&tts, &TtsPlayer::saved);
+            QSignalSpy failed(&tts, &TtsPlayer::saveFailed);
+            tts.saveSpeech(QString::fromUtf8("Привет, это проверка моего голоса."), path);
+            const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 180000;
+            while (saved.isEmpty() && failed.isEmpty()
+                   && QDateTime::currentMSecsSinceEpoch() < deadline) {
+                QTest::qWait(100);
+            }
+            QFile file(path);
+            if (saved.isEmpty() || !file.open(QIODevice::ReadOnly)) return 0;
+            return rateOf(file.readAll());
+        };
+
+        const int cloneRate = synthesize(QStringLiteral("profile"));
+        QVERIFY2(cloneRate > 0, "the service returned no audio for the saved profile");
+        // The built-in Russian voice is another engine with another rate, so an
+        // equal rate would mean the profile was ignored.
+        tts.setModel(QStringLiteral("piper-ru"));
+        tts.setLanguageVoices(QString(), QString());
+        const int builtinRate = synthesize(QStringLiteral("builtin"));
+        QVERIFY2(builtinRate > 0, "the service returned no audio for piper-ru");
+        QVERIFY2(cloneRate != builtinRate,
+                 "the saved profile produced the built-in voice's audio format");
+        qInfo("live answer: %s -> %d Hz, piper-ru -> %d Hz",
+              qPrintable(profile), cloneRate, builtinRate);
+    }
+
     void meetingLabelsTheActiveSourceAndKeepsTimestamps() {
         TestServer server;
         ServiceClient client;

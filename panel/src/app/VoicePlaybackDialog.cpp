@@ -27,12 +27,6 @@
 using namespace VoicePanel;
 
 namespace {
-// "builtin" is the explicit choice of the engine's own voice; an empty entry
-// reaches the player as no voice at all.
-QString voiceId(const QString &selection) {
-    return selection == "builtin" ? QString() : selection;
-}
-
 QByteArray encodeWav(const QVector<float> &samples) {
     QByteArray wav;
     QDataStream out(&wav, QIODevice::WriteOnly);
@@ -284,7 +278,7 @@ VoicePlaybackDialog::VoicePlaybackDialog(PanelApp *app, QWidget *parent) : QDial
         app_->tts()->setInstructions(design->instructions());
         app_->tts()->setSpeechParameters(design->parameters());
         app_->tts()->setSpeechOptions(design->options());
-        app_->tts()->setLanguageVoices(voiceId(settings->ttsRussianVoice), voiceId(settings->ttsEnglishVoice));
+        app_->tts()->setLanguageVoices(settings->ttsRussianVoice, settings->ttsEnglishVoice);
         app_->tts()->setSpeed(settings->ttsSpeed);
         save->setEnabled(false);
         status->setText(tr("Saving audio…"));
@@ -309,8 +303,8 @@ VoicePlaybackDialog::VoicePlaybackDialog(PanelApp *app, QWidget *parent) : QDial
         app_->tts()->setInstructions(design->instructions());
         app_->tts()->setSpeechParameters(design->parameters());
         app_->tts()->setSpeechOptions(design->options());
-        app_->tts()->setLanguageVoices(voiceId(settings->ttsRussianVoice),
-                                       voiceId(settings->ttsEnglishVoice));
+        app_->tts()->setLanguageVoices(settings->ttsRussianVoice,
+                                       settings->ttsEnglishVoice);
         app_->tts()->setSpeed(settings->ttsSpeed);
         app_->tts()->setPauseMs(pause->value());
         const int device = outputBox->currentData().toInt();

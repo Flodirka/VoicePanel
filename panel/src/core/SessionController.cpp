@@ -80,9 +80,21 @@ void SessionController::configure(const Settings &settings, Mode mode) {
         session->setSpeechThreshold(settings.speechThreshold);
     }
     if (tts_) {
-        tts_->setModel(settings.ttsVoiceProfile.isEmpty() ? settings.ttsModel : QStringLiteral("auto"));
+        // What the call hears is the user's own voice. An empty language row
+        // means the saved profile; without one it stays empty and the service
+        // answers with the model's own voice (Piper for Russian on a fresh
+        // install).
+        const QString russian = sessionVoice(settings, settings.ttsRussianVoice);
+        const QString english = sessionVoice(settings, settings.ttsEnglishVoice);
+        QString model = settings.ttsModel;
+        const bool automatic = model.isEmpty() || model == QLatin1String("auto")
+            || model == QLatin1String("profile") || model == QLatin1String("default");
+        // A profile is synthesised by a cloning engine; the automatic route is
+        // what resolves it. A model the user named stays untouched.
+        if (automatic && (!russian.isEmpty() || !english.isEmpty())) model = QStringLiteral("auto");
+        tts_->setModel(model);
         tts_->setVoiceProfile(settings.ttsVoiceProfile);
-        tts_->setLanguageVoices(settings.ttsRussianVoice, settings.ttsEnglishVoice);
+        tts_->setLanguageVoices(russian, english);
         tts_->setSpeed(settings.ttsSpeed);
         tts_->setPauseMs(settings.ttsPauseMs);
     }
@@ -339,7 +351,6 @@ void SessionController::finishCurrent(const QString &text) {
                 emit this->error(tr("Translation failed: %1").arg(error));
             } else {
                 emit caption(text, result.trimmed());
-                if (speakCaptions_ && tts_) tts_->speak(result.trimmed());
             }
             pump();
         });
@@ -399,10 +410,15 @@ void SessionController::pumpTranslation() {
         } else {
             const QString translated = result.trimmed();
             emit caption(heard, translated);
-            if (speakCaptions_ && tts_ && !translated.isEmpty()) tts_->speak(translated);
         }
         pumpTranslation();
     });
+}
+
+QString SessionController::sessionVoice(const Settings &settings, const QString &chosen) {
+    // Settings::load has already turned the retired "builtin" placeholder into
+    // an empty row (normalizeVoiceSelection), so empty is the only case here.
+    return chosen.isEmpty() ? settings.ttsVoiceProfile : chosen;
 }
 
 QVector<SessionController::Turn> SessionController::parseDiarized(const QString &text) {

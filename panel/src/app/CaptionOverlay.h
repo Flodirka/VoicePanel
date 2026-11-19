@@ -7,7 +7,6 @@ class LevelBadge;
 class SettingsPopover;
 }
 
-class QCheckBox;
 class QComboBox;
 class QFrame;
 class QLabel;
@@ -62,7 +61,6 @@ private:
     QComboBox *direction_ = nullptr;
     QComboBox *display_ = nullptr;
     QComboBox *size_ = nullptr;
-    QCheckBox *voice_ = nullptr;
     SettingsPopover *settings_ = nullptr;
     QPushButton *settingsButton_ = nullptr;
     LevelBadge *micBadge_ = nullptr;

@@ -41,7 +41,6 @@ public:
     // Interpreters sometimes only want the caption; the outgoing voice can be
     // switched off without stopping the session.
     void setOutgoing(Outgoing mode) { outgoing_ = mode; }
-    void setSpeakCaptions(bool on) { speakCaptions_ = on; }
     // -1 = follow the setting; 0 = English into Russian, 1 = Russian into English.
     void setDirection(int direction) { direction_ = direction; }
     bool start(const QString &vadModelPath);
@@ -108,6 +107,10 @@ private:
     // Zero means nobody known was speaking there.
     QPair<int, double> closestKnownSpeaker(double start, double end) const;
     static QString speakerLabel(int canonical);
+    // The voice a live session speaks for one language: an empty row means the
+    // voice the user saved, so a recorded clone is what the call hears; only a
+    // named profile overrides it.
+    static QString sessionVoice(const Settings &settings, const QString &chosen);
     void startDiarize(std::function<void()> then);
     bool looksLikeBleed(const QString &text) const;
     static QString comparable(const QString &text);
@@ -130,7 +133,6 @@ private:
     bool busy_ = false;
     bool running_ = false;
     Outgoing outgoing_ = Outgoing::Translated;
-    bool speakCaptions_ = false;
     int direction_ = -1;
     QString transcript_;
     // The microphone hears whatever the speakers play. Without echo
