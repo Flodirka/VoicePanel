@@ -4,6 +4,7 @@
 #include <QStringList>
 
 class QComboBox;
+class QJsonObject;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
@@ -34,6 +35,8 @@ private:
     void load();
     void save();
     void showSnapshot(const QByteArray &body);
+    void showEngines(const QJsonObject &snapshot);
+    void selectAllGpu();
     void restoreChoices();
     void updateSaveState();
     QString errorDetail(const QByteArray &body, const QString &fallback) const;

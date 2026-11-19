@@ -4,7 +4,6 @@
 #include <QJsonObject>
 #include <QList>
 #include <QMap>
-#include <QList>
 #include <QObject>
 #include <QVector>
 
@@ -87,7 +86,13 @@ private:
     void onUtterance(bool incoming, const QVector<float> &samples, double at);
     void pump();
     void transcribeCurrent();
+    // Recognition and speaker separation run in separate engine processes, so
+    // they are started together and the phrase is finished when both are in.
+    void maybeFinishCurrent();
     void finishCurrent(const QString &text);
+    // Subtitles translate in their own queue: the recogniser must be free for
+    // the next phrase while a sentence waits for the translator.
+    void pumpTranslation();
     void appendTranscript(const QString &speaker, const QString &text, double at);
     // Speaker identity across utterances. Offline diarisation numbers speakers
     // per call, so a second phrase from the same person came back as a new
@@ -99,6 +104,9 @@ private:
         int speaker = 0;
     };
     int canonicalSpeaker(double start, double end);
+    // The known person whose speech overlaps this interval, and by how much.
+    // Zero means nobody known was speaking there.
+    QPair<int, double> closestKnownSpeaker(double start, double end) const;
     static QString speakerLabel(int canonical);
     void startDiarize(std::function<void()> then);
     bool looksLikeBleed(const QString &text) const;
@@ -143,7 +151,18 @@ private:
     int nextSpeaker_ = 1;
     QString pendingSpeaker_;
     QString lastRemoteLine_;
-    static constexpr int kDiarizeWindow = 320000;   // 20 s at 16 kHz, the context each window carries
+    QList<QString> translationQueue_;
+    bool translating_ = false;
+    QString currentText_;
+    QString currentError_;
+    bool currentRecognized_ = false;
+    bool currentDiarized_ = true;
+    // Speaker identity survives only while the diariser can still hear the
+    // person: its ids are numbered per request. A 20 s window forgot everyone
+    // who paused for more than a few seconds and the transcript collected a new
+    // "Speaker N" every phrase. 120 s at 16 kHz keeps every voice that took
+    // part in the last two minutes, at a fixed 23 MB of audio.
+    static constexpr int kDiarizeWindow = 1920000;
     quint64 generation_ = 0;
 };
 

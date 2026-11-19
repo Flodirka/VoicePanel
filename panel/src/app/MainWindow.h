@@ -11,6 +11,7 @@
 class QBoxLayout;
 class QPushButton;
 class QCheckBox;
+class QScreen;
 class QTextEdit;
 class QSplitter;
 class PanelTests;
@@ -64,10 +65,10 @@ private:
     void updateActions();
     void finishSession();
     void startNewTranscript();
-    void applyDockPosition();
+    void setDockPosition(const QString &position, QScreen *display);
+    void applyDockPosition(QScreen *display = nullptr);
     void updateDockLayout();
     void positionPreview();
-    QString nearestEdge() const;
     void saveGeometrySettings();
     void reviewCorrection(bool accept);
     void reviewCorrections(bool accept);
@@ -78,6 +79,8 @@ private:
     void copyResult();
     void translateResult();
     void updateMicrophone(double rms = 0);
+    void setPanelStatus(const QString &status);
+    void updateMicrophoneTooltip();
 
     PanelApp *app_;
     QBoxLayout *rootLayout_ = nullptr;
@@ -102,8 +105,7 @@ private:
     QPushButton *rejectButton_ = nullptr;
     QPushButton *translateButton_ = nullptr;
     QCheckBox *autoTranslateBox_ = nullptr;
-    QLabel *langLabel_ = nullptr;
-    QLabel *statusLabel_ = nullptr;
+    QString panelStatus_;
     QLabel *processingLabel_ = nullptr;
     QLabel *changeLabel_ = nullptr;
     QLabel *resultLabel_ = nullptr;

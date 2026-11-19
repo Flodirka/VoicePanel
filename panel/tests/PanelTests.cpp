@@ -19,9 +19,12 @@
 #include "core/TtsPlayer.h"
 #include "core/HotkeyManager.h"
 #include "audio/WasapiCapture.h"
+#include <QElapsedTimer>
 #include <QScreen>
 #include <QMessageBox>
 #include <QMenu>
+#include <QMouseEvent>
+#include <QtEndian>
 #include <QPainter>
 #include <QPointer>
 #include <QLineEdit>
@@ -61,6 +64,7 @@ class TestServer : public QObject {
 public:
     QTcpServer server;
     QList<QPointer<QTcpSocket>> requests;
+    QStringList targets;               // request line per entry, e.g. "POST /v1/audio/diarize HTTP/1.1"
     explicit TestServer() {
         server.listen(QHostAddress::LocalHost);
         connect(&server, &QTcpServer::newConnection, this, [this]() {
@@ -85,6 +89,7 @@ public:
                         return;
                     }
                     requests << socket;
+                    targets << QString::fromLatin1(headers.first()).trimmed();
                 });
             }
         });
@@ -109,6 +114,35 @@ private:
         for (auto *b : widget.findChildren<QPushButton *>())
             if (b->text().contains(text)) return b;
         return nullptr;
+    }
+
+    // 16 kHz mono PCM16, the only format the live sessions produce.
+    static QVector<float> readWav16k(const QString &path) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) return {};
+        const QByteArray all = file.readAll();
+        if (all.size() < 44 || !all.startsWith("RIFF")) return {};
+        int offset = 12, dataOffset = -1, dataSize = 0;
+        while (offset + 8 <= all.size()) {
+            const quint32 size = qFromLittleEndian<quint32>(all.constData() + offset + 4);
+            if (all.mid(offset, 4) == "data") {
+                dataOffset = offset + 8;
+                dataSize = int(qMin<quint32>(size, quint32(all.size() - dataOffset)));
+                break;
+            }
+            offset += 8 + int(size) + (int(size) & 1);
+        }
+        if (dataOffset < 0) return {};
+        QVector<float> samples(dataSize / 2);
+        for (int i = 0; i < samples.size(); ++i)
+            samples[i] = qFromLittleEndian<qint16>(all.constData() + dataOffset + 2 * i) / 32768.0f;
+        return samples;
+    }
+
+    static int requestIndex(const TestServer &server, const QString &needle, int from = 0) {
+        for (int i = from; i < server.requests.size(); ++i)
+            if (server.targets.value(i).contains(needle)) return i;
+        return -1;
     }
 
     static bool capturePanel(MainWindow &window, const QString &path) {
@@ -585,9 +619,9 @@ private slots:
         window.setDockPosition("right");
         QVERIFY(window.width() <= 80);
         QVERIFY(window.grab().save("panel-vertical.png"));
+        const QSize railSize = window.size();
         window.setDockPosition("top");
-        QCOMPARE(window.height(), 56);
-        QVERIFY(window.width() >= 640);
+        QCOMPARE(window.size(), railSize.transposed());
     }
 
     void pendingSpeculationIsReusedAtPauseWithoutStop() {
@@ -1462,6 +1496,65 @@ private slots:
         window.setDockPosition("free");
     }
 
+    void draggingGripDocksAtCursorEdge() {
+        MainWindow window(app_);
+        window.show();
+        const QRect display = window.screen()->geometry();
+        const QRect area = window.screen()->availableGeometry();
+        const QPoint center = area.center();
+        const QList<QPair<QString, QPoint>> drops{
+            {"top", {center.x(), display.top() + 1}}, {"bottom", {center.x(), display.bottom() - 1}},
+            {"left", {display.left() + 1, center.y()}}, {"right", {display.right() - 1, center.y()}},
+            {"free", center + QPoint(-50, 100)}};
+        auto *grip = window.placementButton_;
+        for (const auto &[dock, drop] : drops) {
+            window.setDockPosition("free");
+            window.move(center - QPoint(window.width() / 2, 100));
+            QCoreApplication::processEvents();
+            const QPoint grab = grip->rect().center();
+            const QPoint offset = grip->mapTo(&window, grab);
+            QTest::mousePress(grip, Qt::LeftButton, Qt::NoModifier, grab);
+            QMouseEvent move(QEvent::MouseMove, grip->mapFromGlobal(drop), drop,
+                             Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(grip, &move);
+            QMouseEvent release(QEvent::MouseButtonRelease, grip->mapFromGlobal(drop), drop,
+                                Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(grip, &release);
+            QCOMPARE(app_->settings()->dockPosition, dock);
+            if (dock == "free") QCOMPARE(window.pos(), drop - offset);
+        }
+    }
+
+    void compactToolbarHasEqualInsetsAndOnlyIcons() {
+        MainWindow window(app_);
+        window.show();
+        QSize horizontal;
+        for (const QString &dock : {QString("free"), QString("top"), QString("bottom"), QString("left"), QString("right")}) {
+            window.setDockPosition(dock);
+            QCoreApplication::processEvents();
+            QVERIFY(window.compactBar_->findChildren<QLabel *>().isEmpty());
+            const auto buttons = window.compactBar_->findChildren<QPushButton *>();
+            QCOMPARE(buttons.size(), 9);
+            const bool vertical = dock == "left" || dock == "right";
+            if (dock == "free") horizontal = window.size();
+            QCOMPARE(window.size(), vertical ? horizontal.transposed() : horizontal);
+            QRect bounds;
+            for (int i = 0; i < buttons.size(); ++i) {
+                auto *button = buttons[i];
+                QVERIFY(button->text().isEmpty());
+                QVERIFY(!button->icon().isNull());
+                QCOMPARE(button->size(), QSize(36, 36));
+                const QRect rect(button->mapTo(&window, QPoint()), button->size());
+                if (i > 0) {
+                    if (vertical) QCOMPARE(rect.top() - bounds.bottom() - 1, 8);
+                    else QCOMPARE(rect.left() - bounds.right() - 1, 8);
+                }
+                bounds = bounds.united(rect);
+            }
+            QCOMPARE(bounds, window.rect().adjusted(10, 10, -10, -10));
+        }
+    }
+
     void previewKeepsToolbarAndButtonsInPlace() {
         MainWindow window(app_);
         window.show();
@@ -1480,8 +1573,10 @@ private slots:
             QCOMPARE(window.editorPage_->grab().toImage().pixelColor(4, 100), QColor("#110e16"));
             QVERIFY(!preview.intersects(toolbar));
             if (dock == "free" || dock == "top" || dock == "bottom") {
-                QCOMPARE(preview.x(), toolbar.x());
-                QCOMPARE(preview.width(), toolbar.width());
+                const QRect area = window.screen()->availableGeometry().adjusted(8, 8, -8, -8);
+                QCOMPARE(preview.width(), qMin(720, area.width()));
+                QCOMPARE(preview.x(), qBound(area.left(), toolbar.center().x() - window.editorPage_->rect().center().x(),
+                                             area.right() - preview.width() + 1));
                 if (dock == "bottom") QCOMPARE(preview.bottom() + 1, toolbar.top());
                 else QCOMPARE(preview.top(), toolbar.bottom() + 1);
             }
@@ -1585,7 +1680,7 @@ private slots:
     }
 
     void liveTranslationKeepsProcessingQueuedSpeechAfterAFailure() {
-        for (const auto mode : {SessionController::Mode::Interpreter, SessionController::Mode::Subtitles}) {
+        for (const auto mode : {SessionController::Mode::Interpreter}) {
             TestServer server;
             ServiceClient client;
             client.setBaseUrl(server.url());
@@ -1612,6 +1707,49 @@ private slots:
             QVERIFY(control.remoteQueue_.isEmpty());
             control.stop();
         }
+    }
+
+    void transcriptOnlySubtitlesDoNotRequestTranslation() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        SessionController control(&client, nullptr);
+        Settings settings;
+        settings.subtitlesDisplay = 2;
+        control.configure(settings, SessionController::Mode::Subtitles);
+        control.running_ = true;
+        QSignalSpy captions(&control, &SessionController::caption);
+        control.onUtterance(true, QVector<float>(8000, 0.05f), 0.0);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 1, 1000);
+        server.reply(0, R"({"text":"first phrase"})");
+        QTRY_COMPARE_WITH_TIMEOUT(captions.size(), 1, 1000);
+        QCOMPARE(captions.first().at(0).toString(), QString("first phrase"));
+        QVERIFY(captions.first().at(1).toString().isEmpty());
+        QCOMPARE(server.requests.size(), 1);
+    }
+
+    void subtitleRecognitionContinuesWhileTranslationWaits() {
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        SessionController control(&client, nullptr);
+        control.configure(Settings{}, SessionController::Mode::Subtitles);
+        control.running_ = true;
+        QSignalSpy captions(&control, &SessionController::caption);
+        const QVector<float> samples(8000, 0.05f);
+        control.onUtterance(true, samples, 0.0);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 1, 1000);
+        server.reply(0, R"({"text":"first"})");
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 2, 1000);
+        control.onUtterance(true, samples, 1.0);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 3, 1000);
+        server.reply(2, R"({"text":"second"})");
+        server.reply(1, R"({"result":"temporary failure"})", false);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 4, 1000);
+        server.reply(3, R"({"result":"second translated"})");
+        QTRY_COMPARE_WITH_TIMEOUT(captions.size(), 1, 1000);
+        QCOMPARE(captions.first().at(0).toString(), QString("second"));
+        QCOMPARE(captions.first().at(1).toString(), QString("second translated"));
     }
 
     void interpreterTurnsIncomingSpeechIntoARussianCaption() {
@@ -1681,9 +1819,14 @@ private slots:
 
         QVector<float> samples(16000, 0.05f);          // one second
         for (int i = 0; i < 2; ++i) {
-            const int first = server.requests.size();
+            const int before = server.requests.size();
             control.onUtterance(true, samples, 10.0 + i * 2.0);
-            QTRY_COMPARE(server.requests.size(), first + 1);        // diarisation
+            // Speaker separation and recognition run in different engine
+            // processes, so both requests are in flight at once.
+            QTRY_COMPARE(server.requests.size(), before + 2);
+            const int diar = requestIndex(server, "diarize", before);
+            const int asr = requestIndex(server, "transcriptions", before);
+            QVERIFY(diar >= 0 && asr >= 0);
             // The window carries the previous phrase as context, so a real run
             // reports the earlier speech in it as well; both turns come back
             // with the same engine id (samples relative to the window). A
@@ -1693,12 +1836,11 @@ private slots:
             const QString context = i
                 ? QStringLiteral(R"({"start_sample":0,"end_sample":%1,"speaker_id":"speaker_0","confidence":0.97},)").arg(from)
                 : QString();
-            server.reply(first, QStringLiteral(R"({"speaker_turns":[%1{"start_sample":%2,"end_sample":%3,"speaker_id":"speaker_0","confidence":0.99}]})")
+            server.reply(diar, QStringLiteral(R"({"speaker_turns":[%1{"start_sample":%2,"end_sample":%3,"speaker_id":"speaker_0","confidence":0.99}]})")
                                     .arg(context).arg(from).arg(from + 16000).toUtf8());
-            QTRY_COMPARE(server.requests.size(), first + 2);        // recognition
-            server.reply(first + 1, R"({"text":"привет"})");
-            QTRY_COMPARE(server.requests.size(), first + 3);        // correction
-            server.reply(first + 2, R"({"result":"Привет."})");
+            server.reply(asr, R"({"text":"привет"})");
+            QTRY_COMPARE(server.requests.size(), before + 3);        // correction
+            server.reply(before + 2, R"({"result":"Привет."})");
             QTRY_COMPARE(lines.size(), i + 1);
         }
         QCOMPARE(lines.at(0).at(0).toString(), QString("Speaker 1"));
@@ -2141,6 +2283,110 @@ private slots:
         socket->disconnectFromHost();
         QTest::qWait(80);
         QCOMPARE(batches.size(), 0);
+    }
+
+    // Long meeting acceptance: latency and memory must stay flat and the
+    // speaker numbers must survive phrase after phrase. The fixture is ~6
+    // minutes of a three-person AMI recording looped with pauses; build it with
+    // runtime/bench/_mkmeeting.py and run against a live service:
+    //   VOICEPANEL_MEETING_BENCH=http://127.0.0.1:8080
+    void meetingLongRecordingKeepsSpeakersAndLatency() {
+        const QString url = qEnvironmentVariable("VOICEPANEL_MEETING_BENCH");
+        if (url.isEmpty()) QSKIP("Opt-in: set VOICEPANEL_MEETING_BENCH to the service URL for the long meeting run");
+        const QVector<float> call = readWav16k(QStringLiteral("runtime/bench/meeting-long-16k.wav"));
+        QVERIFY2(call.size() > 16000 * 60, "fixture missing: run runtime/bench/_mkmeeting.py");
+
+        Settings settings = *app_->settings();
+        settings.meetingDiarize = true;
+        settings.meetingLanguage = 2;          // the fixture is English
+        app_->service()->setBaseUrl(url);
+        SessionController control(app_->service(), nullptr);
+        control.configure(settings, SessionController::Mode::Meeting);
+        control.running_ = true;
+
+        QList<QPair<QString, QString>> lines;
+        QStringList failures;
+        connect(&control, &SessionController::line, this,
+                [&lines](const QString &speaker, const QString &text, double) { lines.append(qMakePair(speaker, text)); });
+        connect(&control, &SessionController::error, this,
+                [&failures](const QString &message) { failures.append(message); });
+
+        // The VAD's own rule: a phrase closes after ~0.6 s of silence.
+        QList<QPair<int, int>> phrases;
+        constexpr int frame = 800;              // 50 ms at 16 kHz
+        int speechStart = -1, silence = 0;
+        for (int offset = 0; offset < call.size(); offset += frame) {
+            double energy = 0;
+            for (int i = offset; i < offset + frame && i < call.size(); ++i) energy += call[i] * call[i];
+            const bool speech = qSqrt(energy / frame) > 0.01;
+            if (speech) {
+                if (speechStart < 0) speechStart = offset;
+                silence = 0;
+            } else if (speechStart >= 0 && (silence += frame) >= 9600) {
+                if (offset + frame - speechStart >= 16000)
+                    phrases.append(qMakePair(speechStart, offset + frame - speechStart));
+                speechStart = -1;
+                silence = 0;
+            }
+            if (speechStart >= 0 && offset + frame - speechStart >= 16000 * 12) {   // hard cap like the VAD
+                phrases.append(qMakePair(speechStart, 16000 * 12));
+                speechStart = -1;
+                silence = 0;
+            }
+        }
+        QVERIFY2(phrases.size() >= 20, qPrintable(QStringLiteral("only %1 phrases").arg(phrases.size())));
+
+        QList<QPair<QString, qint64>> records;      // speaker label and end-to-end time
+        for (const auto &[start, length] : phrases) {
+            const int before = lines.size();
+            QElapsedTimer clock;
+            clock.start();
+            control.onUtterance(true, call.mid(start, length), double(start) / 16000.0);
+            QTRY_VERIFY_WITH_TIMEOUT(!control.busy_, 180000);
+            records.append(qMakePair(lines.size() > before ? lines.last().first : QString(), clock.elapsed()));
+        }
+        control.stop();
+
+        QSet<QString> speakers;
+        QList<qint64> times;
+        for (const auto &record : records) {
+            if (!record.first.isEmpty()) speakers.insert(record.first);
+            times.append(record.second);
+        }
+        auto median = [](QList<qint64> values) {
+            std::sort(values.begin(), values.end());
+            return values.value(values.size() / 2);
+        };
+        // The first third of a meeting is a ramp: the speaker-separation window
+        // is still filling, so a phrase there is cheaper than the steady state.
+        // The acceptance criterion is that the running meeting does not get
+        // slower, so the middle third is the baseline.
+        const int third = qMax(1, times.size() / 3);
+        const qint64 firstThird = median(times.mid(0, third));
+        const qint64 steady = median(times.mid(third, third));
+        const qint64 lastThird = median(times.mid(times.size() - third));
+
+        QDir().mkpath(QStringLiteral("runtime/reports/meeting-long"));
+        QJsonArray perPhrase;
+        for (const auto &record : records)
+            perPhrase.append(QJsonObject{{"speaker", record.first}, {"ms", double(record.second)}});
+        QJsonObject report{{"phrases", perPhrase},
+                           {"median_first_third_ms", double(firstThird)},
+                           {"median_steady_ms", double(steady)},
+                           {"median_last_third_ms", double(lastThird)},
+                           {"speakers", QJsonArray::fromStringList(speakers.values())},
+                           {"errors", QJsonArray::fromStringList(failures)}};
+        QFile out(QStringLiteral("runtime/reports/meeting-long/result.json"));
+        if (out.open(QIODevice::WriteOnly))
+            out.write(QJsonDocument(report).toJson(QJsonDocument::Indented));
+
+        qInfo("meeting: %lld phrases, %lld speakers, median ramp %lld -> steady %lld -> %lld ms",
+              qint64(records.size()), qint64(speakers.size()), firstThird, steady, lastThird);
+        QVERIFY2(failures.isEmpty(), qPrintable(failures.join("; ").left(300)));
+        QVERIFY2(speakers.size() >= 2 && speakers.size() <= 4,      // three voices, one spare number
+                 qPrintable(speakers.values().join(", ")));
+        QVERIFY2(lastThird <= steady * 1.3 + 500,
+                 qPrintable(QStringLiteral("steady %1 ms -> %2 ms").arg(steady).arg(lastThird)));
     }
 
     void captureWindows() {

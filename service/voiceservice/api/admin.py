@@ -235,6 +235,9 @@ def _compute_state(registry: Registry) -> dict[str, Any]:
         })
     return {
         "groups": groups,
+        # The launch-time engine choice travels with the device choices so the
+        # settings window opens on both without a second round trip.
+        "engines": engines.snapshot(registry.cfg),
         "storage": str(compute.state_path(registry.cfg["_root"])),
     }
 

@@ -60,7 +60,15 @@ void ServerSettingsDialog::buildUi() {
     shared->setProperty("role", "caption");
     root->addWidget(shared);
 
-    auto *chooseEngines = new QPushButton(tr("Choose backends for the next service start…"));
+    // One click for the whole service on the GPU: the per-process rows above
+    // stay the place to make a single process different.
+    auto *allGpu = new QPushButton(tr("Run everything on CUDA"));
+    allGpu->setObjectName("useCudaEverywhere");
+    allGpu->setToolTip(tr("Select the GPU build for every process that has one installed."));
+    root->addWidget(allGpu);
+    connect(allGpu, &QPushButton::clicked, this, &ServerSettingsDialog::selectAllGpu);
+
+    auto *chooseEngines = new QPushButton(tr("Reload installed backends"));
     chooseEngines->setObjectName("chooseBackends");
     root->addWidget(chooseEngines);
     connect(chooseEngines, &QPushButton::clicked, this, &ServerSettingsDialog::loadEngines);
@@ -77,6 +85,8 @@ void ServerSettingsDialog::buildUi() {
     enginesForm->addRow(saveEngines);
     connect(saveEngines, &QPushButton::clicked, this, &ServerSettingsDialog::saveEngines);
     root->addWidget(enginesBox_);
+    // Shown as soon as the service reports its engines; hidden only while that
+    // answer is missing, so an empty box is never presented as a choice.
     enginesBox_->hide();
 
     status_ = new QLabel(tr("Reading the service…"));
@@ -160,9 +170,46 @@ void ServerSettingsDialog::showSnapshot(const QByteArray &body) {
         row.state->setText(group.value("busy").toBool() ? tr("Busy")
                           : group.value("running").toBool() ? tr("Running") : tr("Stopped"));
     }
+    const QJsonObject enginesSnapshot = QJsonDocument::fromJson(body).object().value("engines").toObject();
+    if (!enginesSnapshot.isEmpty()) showEngines(enginesSnapshot);
+    enginesBox_->setVisible(!enginesSnapshot.isEmpty());
     loading_ = false;
     status_->setText(tr("Current choices are shown. Press Save to apply a change."));
     updateSaveState();
+}
+
+void ServerSettingsDialog::showEngines(const QJsonObject &snapshot) {
+    const auto selected = snapshot.value("selected").toObject();
+    const auto available = snapshot.value("available").toObject();
+    for (const auto &task : {QString("asr"), QString("tts")}) {
+        auto *combo = task == "asr" ? asrEngine_ : ttsEngine_;
+        combo->clear();
+        for (const auto &value : available.value(task).toArray()) {
+            const auto choice = value.toObject();
+            if (!choice.value("available").toBool()) continue;
+            combo->addItem(choice.value("id").toString() + " (" + choice.value("model").toString() + ")",
+                           choice.value("id").toString());
+        }
+        const QString id = selected.value(task).toString();
+        if (!id.isEmpty() && combo->findData(id) < 0)
+            combo->addItem(tr("%1 (files unavailable)").arg(id), id);
+        combo->setCurrentIndex(combo->findData(id));
+        engineChoices_[task] = id;
+    }
+}
+
+void ServerSettingsDialog::selectAllGpu() {
+    if (rows_.isEmpty()) {
+        status_->setText(tr("Reading the service…"));
+        return;
+    }
+    // Each change updates Save through currentIndexChanged; a no-op leaves it
+    // disabled, which is the honest state.
+    for (auto it = rows_.begin(); it != rows_.end(); ++it) {
+        const int index = it.value().device->findData(QStringLiteral("gpu"));
+        if (index >= 0) it.value().device->setCurrentIndex(index);   // no CUDA build: keep CPU
+    }
+    status_->setText(tr("Every process with a CUDA build is set to the GPU."));
 }
 
 void ServerSettingsDialog::restoreChoices() {
@@ -215,21 +262,7 @@ void ServerSettingsDialog::loadEngines() {
         if (!self) return;
         if (!ok) { status_->setText(errorDetail(body, error)); return; }
         const auto snapshot = QJsonDocument::fromJson(body).object();
-        const auto selected = snapshot.value("selected").toObject();
-        const auto available = snapshot.value("available").toObject();
-        for (const auto &task : {QString("asr"), QString("tts")}) {
-            auto *combo = task == "asr" ? asrEngine_ : ttsEngine_;
-            combo->clear();
-            for (const auto &value : available.value(task).toArray()) {
-                const auto choice = value.toObject();
-                if (choice.value("available").toBool()) combo->addItem(
-                    choice.value("id").toString() + " (" + choice.value("model").toString() + ")", choice.value("id").toString());
-            }
-            const QString id = selected.value(task).toString();
-            if (combo->findData(id) < 0) combo->addItem(tr("%1 (files unavailable)").arg(id), id);
-            combo->setCurrentIndex(combo->findData(id));
-            engineChoices_[task] = id;
-        }
+        showEngines(snapshot);
         enginesBox_->show();
         status_->setText(snapshot.value("restart_required").toBool()
             ? tr("Backend choices are saved. Stop the service, then start it from its tray menu to use them.")
