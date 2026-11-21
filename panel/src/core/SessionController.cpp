@@ -9,6 +9,8 @@
 #include <QRegularExpression>
 #include <QSet>
 
+#include <algorithm>
+
 namespace VoicePanel {
 
 namespace {
@@ -109,6 +111,15 @@ bool SessionController::start(const QString &vadModelPath) {
     hasCurrent_ = false;
     busy_ = false;
     translating_ = false;
+    // A new session is a new call: the diariser numbers people per run, and
+    // leftover identity from the previous one would label the first phrase of
+    // a fresh recording with an old speaker number.
+    remoteTimeline_.clear();
+    timelineStartAt_ = 0.0;
+    timelineStarted_ = false;
+    knownTurns_.clear();
+    nextSpeaker_ = 1;
+    pendingSpeaker_.clear();
     ++generation_;
 
     mic_->setVadModel(vadModelPath);
@@ -192,9 +203,12 @@ void SessionController::transcribeCurrent() {
     } else if (mode_ == Mode::Subtitles) {
         language = settings_.subtitlesLanguage == 0 ? QStringLiteral("en") : QStringLiteral("ru");
     }
-    // Remote meeting speech is labelled by a separate diariser, so the words can
-    // come from whichever recogniser handles the meeting language best.
-    const bool needsDiarize = mode_ == Mode::Meeting && current_.incoming;
+    // Remote meeting speech and captioned application audio are labelled by a
+    // separate diariser, so the words can come from whichever recogniser
+    // handles the language best. Both share one rolling window, so a voice
+    // keeps its number for as long as it keeps speaking.
+    const bool needsDiarize =
+        current_.incoming && (mode_ == Mode::Meeting || mode_ == Mode::Subtitles);
     currentRecognized_ = false;
     currentDiarized_ = !needsDiarize;
     currentText_.clear();
@@ -324,11 +338,15 @@ void SessionController::finishCurrent(const QString &text) {
     // following phrase, which is what made the overlay fall behind.
     if (mode_ == Mode::Subtitles) {
         busy_ = false;
+        // One label per phrase, taken from the same window the meeting uses.
+        // Empty until the diariser has heard this stream's first voice.
+        const QString speaker = pendingSpeaker_;
+        pendingSpeaker_.clear();
         if (settings_.subtitlesDisplay == 2) {
             // Transcript only: no translator call is needed at all.
-            emit caption(text, QString());
+            emit caption(speaker, text, QString());
         } else {
-            translationQueue_.append(text);
+            translationQueue_.append({speaker, text});
             pumpTranslation();
         }
         pump();
@@ -350,7 +368,7 @@ void SessionController::finishCurrent(const QString &text) {
             if (!ok) {
                 emit this->error(tr("Translation failed: %1").arg(error));
             } else {
-                emit caption(text, result.trimmed());
+                emit caption(QString(), text, result.trimmed());
             }
             pump();
         });
@@ -392,7 +410,9 @@ void SessionController::finishCurrent(const QString &text) {
 
 void SessionController::pumpTranslation() {
     if (translating_ || translationQueue_.isEmpty() || !running_) return;
-    const QString heard = translationQueue_.takeFirst();
+    const QPair<QString, QString> queued = translationQueue_.takeFirst();
+    const QString speaker = queued.first;
+    const QString heard = queued.second;
     translating_ = true;
     const QPointer<SessionController> self(this);
     const quint64 generation = generation_;
@@ -400,7 +420,7 @@ void SessionController::pumpTranslation() {
     const QString intoMine = settings_.subtitlesLanguage == 1 ? QStringLiteral("translate_ru_en")
                                                              : QStringLiteral("translate_en_ru");
     service_->processText(heard, intoMine, settings_.profile, QString(), {},
-                          [this, self, generation, heard](bool ok, QString result, QString, QString error) {
+                          [this, self, generation, speaker, heard](bool ok, QString result, QString, QString error) {
         if (!self || generation != generation_) return;
         translating_ = false;
         if (!ok) {
@@ -409,7 +429,7 @@ void SessionController::pumpTranslation() {
             emit this->error(tr("Translation failed: %1").arg(error));
         } else {
             const QString translated = result.trimmed();
-            emit caption(heard, translated);
+            emit caption(speaker, heard, translated);
         }
         pumpTranslation();
     });
@@ -465,6 +485,27 @@ bool SessionController::looksLikeBleed(const QString &text) const {
     return false;
 }
 
+void SessionController::recordKnownTurn(int speaker, double start, double end) {
+    if (!speaker || end <= start) return;
+    // Merge with every span this person already has that touches this one, so
+    // a person's speech is a union of intervals rather than a pile of copies.
+    // The rolling window re-reports the last two minutes on every phrase; the
+    // copies used to outvote the voice actually speaking.
+    KnownTurn span{start, end, speaker};
+    for (int i = 0; i < knownTurns_.size();) {
+        const KnownTurn &known = knownTurns_[i];
+        if (known.speaker == speaker && span.start <= known.end && known.start <= span.end) {
+            span.start = qMin(span.start, known.start);
+            span.end = qMax(span.end, known.end);
+            knownTurns_.removeAt(i);
+            i = 0;          // a merged span can bridge two more
+            continue;
+        }
+        ++i;
+    }
+    knownTurns_.append(span);
+}
+
 int SessionController::canonicalSpeaker(double start, double end) {
     // Same person, next phrase: the most overlapping known turn wins. Offline
     // diarisation numbers speakers per call, so without this every phrase would
@@ -490,20 +531,9 @@ int SessionController::canonicalSpeaker(double start, double end) {
         }
     }
     if (!matched) matched = nextSpeaker_++;
-    knownTurns_.append({start, end, matched});
+    recordKnownTurn(matched, start, end);
     while (knownTurns_.size() > 400) knownTurns_.removeFirst();
     return matched;
-}
-
-QPair<int, double> SessionController::closestKnownSpeaker(double start, double end) const {
-    // Real audio overlap only. A known turn is a stretch of speech by one
-    // person, so a diariser turn that covers part of it is that same person.
-    QPair<int, double> best{0, 0.0};
-    for (const KnownTurn &known : knownTurns_) {
-        const double overlap = qMin(end, known.end) - qMax(start, known.start);
-        if (overlap > best.second) best = {known.speaker, overlap};
-    }
-    return best;
 }
 
 QString SessionController::speakerLabel(int canonical) {
@@ -559,14 +589,21 @@ void SessionController::startDiarize(std::function<void()> then) {
         if (!self || generation != generation_) return;
         if (ok && !turns.isEmpty()) {
             // A diariser numbers its speakers per request, so "speaker_1" only
-            // means something inside one window. This window overlaps speech
-            // that is already labelled, so each of its ids is mapped onto a
-            // known person by real audio overlap — including the turns outside
-            // this phrase. Matching the phrase's own turns alone made every
-            // pause longer than the tolerance mint a fresh speaker.
-            QMap<QString, QPair<double, int>> voices;    // id -> overlap, known person
-            QMap<QString, QPair<double, double>> spans;  // id -> its best turn, session clock
-            QMap<QString, double> inPhrase;              // id -> seconds inside the phrase
+            // means something inside one window. Each of the window's ids is
+            // therefore resolved against the speech already labelled, and ALL
+            // of its turns are recorded under the resolved person — not just
+            // the phrase's own one. A meeting leaves long pauses between
+            // phrases; remembering one short span per phrase left most of the
+            // next window unlabelled, so a phrase that fell between two known
+            // spans minted a fresh speaker every time the window advanced.
+            struct TurnSpan {
+                double start;
+                double end;
+                QString id;
+            };
+            QVector<TurnSpan> spans;
+            QMap<QString, double> inPhrase;           // id -> seconds inside the phrase
+            QMap<QString, double> totals;             // id -> seconds in the window
             for (const QJsonValue &value : turns) {
                 const QJsonObject turn = value.toObject();
                 const double start = windowBase
@@ -575,11 +612,10 @@ void SessionController::startDiarize(std::function<void()> then) {
                     + turn.value(QStringLiteral("end_sample")).toDouble() / 16000.0;
                 const QString id = turn.value(QStringLiteral("speaker_id")).toString();
                 if (id.isEmpty() || end <= start) continue;
-                const auto known = closestKnownSpeaker(start + timelineStart, end + timelineStart);
-                if (known.first && known.second > voices.value(id).first) {
-                    voices[id] = {known.second, known.first};
-                    spans[id] = {start + timelineStart, end + timelineStart};
-                }
+                // Absolute session clock: known turns are stored there and
+                // the rolling window trims its head as it advances.
+                spans.append({start + timelineStart, end + timelineStart, id});
+                totals[id] += end - start;
                 const double overlap = qMin(end, phraseEnd) - qMax(start, phraseStart);
                 if (overlap > 0.0) inPhrase[id] += overlap;
             }
@@ -591,16 +627,92 @@ void SessionController::startDiarize(std::function<void()> then) {
                     dominantId = it.key();
                 }
             }
-            if (!dominantId.isEmpty()) {
-                const int canonical = voices.contains(dominantId)
-                    ? voices.value(dominantId).second
-                    : canonicalSpeaker(phraseStart + timelineStart, phraseEnd + timelineStart);
-                pendingSpeaker_ = speakerLabel(canonical);
-                const auto span = spans.value(dominantId,
-                                              {phraseStart + timelineStart, phraseEnd + timelineStart});
-                knownTurns_.append({span.first, span.second, canonical});
-                while (knownTurns_.size() > 400) knownTurns_.removeFirst();
+            // How much of each id's own speech each already-known person
+            // explains. Known spans are merged per person, so these seconds
+            // are counted once: an id belongs to the person who covers the
+            // larger share of it, not to whoever was recorded most often.
+            QMap<QString, QMap<int, double>> covered;
+            for (const TurnSpan &span : spans) {
+                for (const KnownTurn &known : knownTurns_) {
+                    const double overlap = qMin(span.end, known.end) - qMax(span.start, known.start);
+                    if (overlap > 0.0) covered[span.id][known.speaker] += overlap;
+                }
             }
+            struct Candidate {
+                double share;
+                QString id;
+                int person;
+            };
+            QVector<Candidate> candidates;
+            for (auto id = covered.constBegin(); id != covered.constEnd(); ++id) {
+                int best = 0;
+                double most = 0.0;
+                for (auto person = id.value().constBegin(); person != id.value().constEnd(); ++person) {
+                    if (person.value() > most) {
+                        most = person.value();
+                        best = person.key();
+                    }
+                }
+                const double total = totals.value(id.key());
+                const double share = total > 0.0 ? qMin(1.0, most / total) : 0.0;
+                if (best && share >= kDiarizeIdShare) candidates.append({share, id.key(), best});
+            }
+            // The phrase's own voice claims its person first: in a long window
+            // the diariser sometimes splits one voice into several ids, and
+            // letting another fragment take the person left the voice actually
+            // speaking this phrase without an identity.
+            std::sort(candidates.begin(), candidates.end(),
+                      [&dominantId](const Candidate &a, const Candidate &b) {
+                          const bool aHasPhrase = a.id == dominantId;
+                          const bool bHasPhrase = b.id == dominantId;
+                          if (aHasPhrase != bHasPhrase) return aHasPhrase;
+                          return a.share > b.share;
+                      });
+            QMap<QString, int> resolved;
+            QSet<int> taken;
+            for (const Candidate &candidate : candidates) {
+                if (taken.contains(candidate.person)) continue;
+                resolved[candidate.id] = candidate.person;
+                taken.insert(candidate.person);
+            }
+            if (!dominantId.isEmpty()) {
+                // The phrase names the person its own voice resolved to; only a
+                // voice that overlaps nobody already known is a new one, and
+                // only when the window really holds that voice. A fragment at
+                // a turn boundary used to mint a speaker of its own, which
+                // pushed the third real voice onto a fourth label.
+                int canonical = resolved.value(dominantId, 0);
+                if (!canonical) {
+                    int nearest = 0;
+                    double nearestShare = 0.0;
+                    for (auto person = covered.value(dominantId).constBegin();
+                         person != covered.value(dominantId).constEnd(); ++person) {
+                        const double total = totals.value(dominantId);
+                        const double share = total > 0.0 ? person.value() / total : 0.0;
+                        if (share > nearestShare) {
+                            nearestShare = share;
+                            nearest = person.key();
+                        }
+                    }
+                    const bool substantial =
+                        totals.value(dominantId) >= kDiarizeNewSpeakerSeconds
+                        && inPhrase.value(dominantId) >= kDiarizeNewSpeakerPhraseSeconds;
+                    if (substantial || knownTurns_.isEmpty()) canonical = nextSpeaker_++;
+                    // Not substantial enough to be a participant: name the
+                    // phrase by the closest known voice rather than invent one.
+                    else if (nearest && nearestShare >= kDiarizeNearShare) canonical = nearest;
+                }
+                if (canonical) {
+                    resolved[dominantId] = canonical;
+                    pendingSpeaker_ = speakerLabel(canonical);
+                }
+            }
+            for (const TurnSpan &span : spans) {
+                const int speaker = resolved.value(span.id, 0);
+                if (!speaker) continue;
+                recordKnownTurn(speaker, span.start, span.end);
+            }
+            while (knownTurns_.size() > 800) knownTurns_.removeFirst();
         } else if (!ok && !error.isEmpty()) {
             emit this->error(tr("Speaker separation failed: %1").arg(error));
         }

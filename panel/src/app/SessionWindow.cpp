@@ -62,9 +62,11 @@ SessionWindow::SessionWindow(PanelApp *app, QWidget *parent)
     updateVoiceHint();
 
     connect(controller_, &SessionController::caption, this,
-            [this](const QString &heard, const QString &translated) {
-        if (mode_ == Mode::Interpreter) appendRemote(heard, translated);
-        else appendRemote(heard, translated);   // subtitles: one pane, both lines
+            [this](const QString &speaker, const QString &heard, const QString &translated) {
+        // Interpreter captions have no speaker; subtitles carry the label of the
+        // voice the rolling diarisation window recognised in this phrase.
+        const QString tag = speaker.isEmpty() ? QString() : speaker + QStringLiteral(": ");
+        appendRemote(tag + heard, translated);   // subtitles: one pane, both lines
     });
     connect(controller_, &SessionController::outgoing, this,
             [this](const QString &said, const QString &voiced) {

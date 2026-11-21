@@ -35,9 +35,15 @@ CaptionOverlay::CaptionOverlay(PanelApp *app, QWidget *parent)
 
     controller_ = new SessionController(app_->service(), app_->tts(), this);
     connect(controller_, &SessionController::caption, this,
-            [this](const QString &heard, const QString &translated) {
-        heard_->setText(heard);
-        translated_->setText(translated);
+            [this](const QString &speaker, const QString &heard, const QString &translated) {
+        // The label follows whichever line is on screen: the heard line normally,
+        // the translation when that is the only one shown. Transcript-only mode
+        // shows the heard line at the translation size instead.
+        const QString tag = speaker.isEmpty() ? QString() : speaker + QStringLiteral(": ");
+        const int mode = app_->settings()->subtitlesDisplay;
+        heard_->setText(mode == 1 ? QString() : tag + heard);
+        translated_->setText(mode == 2 ? QString()
+                                       : (mode == 1 ? tag : QString()) + translated);
     });
     connect(controller_, &SessionController::error, this,
             [this](const QString &message) { translated_->setText(message); });
@@ -185,31 +191,31 @@ void CaptionOverlay::buildSettings() {
 
 void CaptionOverlay::applyDisplayMode() {
     const int mode = app_->settings()->subtitlesDisplay;
-    // Transcript-only reads at the translation size: the caption is the main
-    // content in that mode, not a footnote.
     const bool showHeard = mode == 0 || mode == 2;
     const bool showTranslated = mode == 0 || mode == 1;
     heard_->setVisible(showHeard);
     translated_->setVisible(showTranslated);
     divider_->setVisible(mode == 0);
-    QFont big = translated_->font();
-    big.setPixelSize(textSizes().translated);
-    big.setWeight(QFont::DemiBold);
-    if (mode == 2) heard_->setFont(big);
-    else applyTextSize();
+    // Sizes depend on the mode, so they are always applied together with it.
+    applyTextSize();
 }
 
 void CaptionOverlay::applyTextSize() {
     const auto sizes = textSizes();
-    QFont small = heard_->font();
-    small.setPixelSize(sizes.heard);
-    heard_->setFont(small);
+    // Transcript-only reads at the translation size: the caption is the main
+    // content in that mode, not a footnote. Keeping that decision here (and not
+    // only in applyDisplayMode) means a text-size change cannot shrink it back.
+    const bool transcriptOnly = app_->settings()->subtitlesDisplay == 2;
+    QFont heard = heard_->font();
+    heard.setPixelSize(transcriptOnly ? sizes.translated : sizes.heard);
+    heard.setWeight(transcriptOnly ? QFont::DemiBold : QFont::Normal);
+    heard_->setFont(heard);
     QFont big = translated_->font();
     big.setPixelSize(sizes.translated);
     big.setWeight(QFont::DemiBold);
     translated_->setFont(big);
     // Two lines max for either line, so the strip never grows mid-video.
-    heard_->setMaximumHeight(sizes.heard * 3);
+    heard_->setMaximumHeight((transcriptOnly ? sizes.translated : sizes.heard) * 3);
     translated_->setMaximumHeight(sizes.translated * 3);
 }
 
