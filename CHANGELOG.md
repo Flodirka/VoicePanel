@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-11-21
 
 - Label speakers in the subtitles overlay. Captioned application audio runs through the same rolling diarisation window as a meeting, so captions say who spoke.
 - Keep speaker numbers stable across a call. Diariser and known turns are compared on one session clock, and a voice inherits a person only when the overlap is a real share of its speech; a boundary sliver used to renumber voices or merge them onto one label.
@@ -9,6 +9,8 @@
 - Score the long caption acceptance on the final transcript, not only on labels and latency. The report adds WER and CER against a human transcript, covered speech, lost turns, phrases that came back without words, speaker-name accuracy and term recall, and fails when the live run drops too much of the room.
 - Count a lost turn by its words instead of by timing. Captions sit wall to wall, so the old overlap test reported zero lost turns on every run, including the one right before it. A turn now counts as lost when fewer than half of its words appear in the captions over its span, and the report also carries the share of checked words that no caption echoes.
 - Add an offline re-pass for a saved recording: whole-file diarisation, re-recognition per diarised turn and per VAD phrase, cleanup with meeting notes and the context document, and a named Markdown transcript. It reports its own numbers next to the live run's.
+
+See [release notes and known limitations](docs/releases/0.3.0.md).
 
 ## 0.2.0 - 2026-11-17
 

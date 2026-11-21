@@ -126,7 +126,7 @@ the existing 945 MB weights and one loaded model across voice and language
 changes. These are sample measurements, not peak-memory or call-quality guarantees.
 Earlier model-table measurements remain in [Models](docs/models.md).
 
-Version 0.2.0 also fixes recovery of continuous dictation and uses the default GEC model's trained prompt without an automatic output-token cap. See [release setup and known limitations](docs/releases/0.2.0.md).
+Version 0.3.0 names the speaker in captioned application audio and scores the caption run on the final transcript instead of only on labels and latency. It also carries 0.2.0's continuous-capture recovery and engine updates. See [release notes and known limitations](docs/releases/0.3.0.md).
 
 Voice design controls appear for supported models in Settings and Voice
 playback. The API reports the accepted attributes and generation options per

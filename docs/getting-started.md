@@ -104,7 +104,7 @@ Check `http://127.0.0.1:8080/health` for service health. A healthy gateway does 
 .\tools\package_release.ps1 -NoModels -Zip          # all installed engine variants, ZIP and SHA-256
 ```
 
-The bundle contains `VoicePanel.exe` with the Qt/ONNX runtime beside it, public source and documentation, engine binaries, eSpeak and licenses. It ships the example as `config.yaml`. Python 3.12 and service dependencies must be installed; `-NoModels` also requires installing the chosen weights separately. See [0.2.0 setup](releases/0.2.0.md#windows-package). Personal configuration and voice profiles stay outside public archives.
+The bundle contains `VoicePanel.exe` with the Qt/ONNX runtime beside it, public source and documentation, engine binaries, eSpeak and licenses. It ships the example as `config.yaml`. Python 3.12 and service dependencies must be installed; `-NoModels` also requires installing the chosen weights separately. See [0.3.0 setup](releases/0.3.0.md#windows-package). Personal configuration and voice profiles stay outside public archives.
 
 Two checks run against the bundle as shipped:
 
