@@ -2,7 +2,9 @@
 #
 # All artifacts are local (models under runtime/models/, samples and logs under
 
-## FINAL STATE (2026-11-06) — read this first
+Current measurements and runtime choices: [2026-11-17 audit](runtime-update-2026-11-17.md). The following sections describe the earlier investigation. Native HTTP OmniVoice now reuses its model across voices. Audio.cpp 0.9.5 was tested with its separate packed OmniVoice GGUF, which uses more memory than the existing two-file native model.
+
+## Historical state (2026-11-06)
 
 The open questions in the log below are resolved as follows:
 

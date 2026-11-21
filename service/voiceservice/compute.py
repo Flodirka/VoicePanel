@@ -33,10 +33,8 @@ GROUPS: dict[str, dict[str, str]] = {
     "diar": {"label": "Speaker separation", "process": "audiocpp_diar"},
 }
 
-# Group -> backend section. `main` and `diar` run audio.cpp; `clone` runs the
-# omnivoice.cpp engine (the default cloning model; audio.cpp's own clone helper
-# `audiocpp_clone` is the documented qwen3 alternative and is switched by
-# editing its section, not through this group).
+# Group -> backend section. The clone section follows the selected model and
+# can be the native server, a separate audio.cpp helper, or the main process.
 _SECTION = {"clone": "omnivoice", "main": "audiocpp", "diar": "audiocpp_diar"}
 
 # audio.cpp: the CUDA build also runs on the CPU, so the device is `backend`.
@@ -86,7 +84,7 @@ def current_devices(cfg: dict[str, Any]) -> dict[str, str]:
     llama = backends.get("llama") or {}
     return {
         "llm": "gpu" if int(llama.get("gpu_layers", 0) or 0) > 0 else "cpu",
-        "clone": _audiocpp_device(backends.get("omnivoice")),
+        "clone": _audiocpp_device(backends.get(clone_section(cfg))),
         "main": _audiocpp_device(backends.get("audiocpp")),
         "diar": _audiocpp_device(backends.get("audiocpp_diar")),
     }
@@ -98,7 +96,7 @@ def available_devices(cfg: dict[str, Any]) -> dict[str, list[str]]:
     available: dict[str, list[str]] = {}
     for group in GROUPS:
         devices = ["cpu"]
-        gpu_binary = _gpu_binary(group, backends)
+        gpu_binary = _gpu_binary(group, backends, clone_section(cfg))
         if gpu_binary and Path(gpu_binary).is_file():
             devices.append("gpu")
         available[group] = devices
@@ -108,6 +106,9 @@ def available_devices(cfg: dict[str, Any]) -> dict[str, list[str]]:
 def apply_to_config(cfg: dict[str, Any], choices: dict[str, str]) -> None:
     """Point the backend sections at the chosen builds. Raises ValueError."""
     backends = cfg.setdefault("backends", {})
+    clone_key = clone_section(cfg)
+    if clone_key == "audiocpp" and "main" in choices and "clone" in choices and choices["main"] != choices["clone"]:
+        raise ValueError("recognition and cloning share the audio.cpp process; choose the same device")
     for group, device in choices.items():
         if group not in GROUPS:
             raise ValueError(f"unknown group '{group}'")
@@ -115,19 +116,24 @@ def apply_to_config(cfg: dict[str, Any], choices: dict[str, str]) -> None:
             raise ValueError(f"unknown device '{device}' for {group}")
         if group == "llm":
             _apply_llm(backends.setdefault("llama", {}), device)
+            translator = backends.get("llama_translate") or {}
+            if translator.get("enabled", True) and translator.get("model_path"):
+                _apply_llm(translator, device)
         else:
-            key = _SECTION[group]
+            key = clone_key if group == "clone" else _SECTION[group]
             section = backends.get(key)
             if not section:
                 raise ValueError(f"the {group} backend is not configured")
             if not section.get("enabled", True):
                 raise ValueError(f"the {group} backend is disabled in the configuration")
-            _apply_variant(section, group, device)
+            _apply_variant(section, key, device)
 
 
 def apply_overrides(cfg: dict[str, Any]) -> dict[str, str]:
     """Lay the saved choices over the loaded config; bad choices are ignored."""
     overrides = load_overrides(cfg.get("_root", "."))
+    if not cfg.get("tts", {}).get("clone_model"):
+        overrides.pop("clone", None)
     if not overrides:
         return {}
     try:
@@ -139,6 +145,18 @@ def apply_overrides(cfg: dict[str, Any]) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------- helpers
+def clone_section(cfg: dict[str, Any]) -> str:
+    backends = cfg.get("backends", {})
+    model = cfg.get("tts", {}).get("clone_model")
+    for name in ("omnivoice", "audiocpp_clone", "audiocpp"):
+        section = backends.get(name) or {}
+        if section.get("enabled", name == "audiocpp") and any(m.get("id") == model for m in section.get("models", [])):
+            return name
+    if (backends.get("omnivoice") or {}).get("enabled", False):
+        return "omnivoice"
+    return "audiocpp_clone"
+
+
 def _audiocpp_device(section: dict[str, Any] | None) -> str:
     if not section:
         return "cpu"
@@ -151,29 +169,33 @@ def _sibling_binary(binary: str, variant: str) -> Path:
     return path.parent.parent / variant / path.name
 
 
-def _variants(group: str) -> dict[str, str]:
-    return _OMNIVOICE_VARIANTS if group == "clone" else _AUDIOCPP_VARIANTS
+def _variants(section: str) -> dict[str, str]:
+    return _OMNIVOICE_VARIANTS if section == "omnivoice" else _AUDIOCPP_VARIANTS
 
 
-def _gpu_binary(group: str, backends: dict[str, Any]) -> str | None:
+def _gpu_binary(group: str, backends: dict[str, Any], clone_key: str = "omnivoice") -> str | None:
     if group == "llm":
         binary = (backends.get("llama") or {}).get("binary")
         return str(_sibling_binary(str(binary), _LLAMA_GPU_VARIANT)) if binary else None
-    key = _SECTION[group]
+    key = clone_key if group == "clone" else _SECTION[group]
     binary = (backends.get(key) or {}).get("binary")
     if not binary:
         return None
-    return str(_sibling_binary(str(binary), _variants(group)["gpu"]))
+    return str(_sibling_binary(str(binary), _variants(key)["gpu"]))
 
 
-def _apply_variant(section: dict[str, Any], group: str, device: str) -> None:
+def _apply_variant(section: dict[str, Any], key: str, device: str) -> None:
     """Point a process-based backend at the chosen device's build."""
-    variant = _variants(group)[device]
+    variant = _variants(key)[device]
     binary = _sibling_binary(str(section.get("binary", "")), variant)
     if not binary.is_file():
         raise ValueError(f"the {device} build is missing ({binary})")
     section["binary"] = str(binary)
     section["backend"] = _AUDIOCPP_BACKEND[device]
+    if key == "omnivoice" and section.get("codec_binary"):
+        codec = _sibling_binary(section["codec_binary"], variant)
+        if codec.is_file():
+            section["codec_binary"] = str(codec)
 
 
 def _apply_llm(llama: dict[str, Any], device: str) -> None:

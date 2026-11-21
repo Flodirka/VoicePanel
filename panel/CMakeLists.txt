@@ -27,6 +27,7 @@ set(PANEL_SOURCES
   src/app/ServerSettingsDialog.cpp
   src/app/UiKit.cpp
   src/app/VoicePlaybackDialog.cpp
+  src/app/VoiceDesignWidget.cpp
   src/app/ServiceTray.cpp
   src/app/SessionWindow.cpp
   src/app/CaptionOverlay.cpp

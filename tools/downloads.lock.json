@@ -3,49 +3,49 @@
   "downloads": [
     {
       "group": "runtime",
-      "name": "audio-v0.9.2-bin-windows-x64-cpu-portable.zip",
-      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-bin-windows-x64-cpu-portable.zip",
-      "sha256": "4bea04239d753d2d0a294580ad4af2a0fa81b0de244a1b9146650c7f9fa4e84d",
+      "name": "audio-v0.9.5-bin-windows-x64-cpu-portable.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.5/audio-v0.9.5-bin-windows-x64-cpu-portable.zip",
+      "sha256": "9f470c3b254205d044e91e84d609424f528734cd06b74968ab0e4868a30b839a",
       "destination": "downloads/bin/audio-cpu.zip",
       "extract_to": "runtime/bin/audiocpp-cpu"
     },
     {
       "group": "runtime",
-      "name": "audio-v0.9.2-bin-windows-x64-vulkan.zip",
-      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-bin-windows-x64-vulkan.zip",
-      "sha256": "271402eae94195b9e2204e9f07e576bd0df879c75bafb0fa2f940830648d63f9",
+      "name": "audio-v0.9.5-bin-windows-x64-vulkan-portable.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.5/audio-v0.9.5-bin-windows-x64-vulkan-portable.zip",
+      "sha256": "6c304c9a1e0cfc18b2d3b208b03d40365fec71d094ee4da4f695b2d9e7de29e8",
       "destination": "downloads/bin/audio-vulkan.zip",
       "extract_to": "runtime/bin/audiocpp-vulkan"
     },
     {
       "group": "runtime",
-      "name": "llama-b11871-bin-win-cpu-x64.zip",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/llama-b11871-bin-win-cpu-x64.zip",
-      "sha256": "a39ae0a534a3ccfbf5c10b5b5c662da93cecac3c796173de786b7e89f4f0ccfa",
+      "name": "llama-b12359-bin-win-cpu-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-win-cpu-x64.zip",
+      "sha256": "837c1655e87df3b66989f4be33a792a1399c785bf259038dc75c900096683e69",
       "destination": "downloads/bin/llama-cpu.zip",
       "extract_to": "runtime/bin/llama-cpu"
     },
     {
       "group": "runtime",
-      "name": "llama-b11871-bin-win-cuda-12.4-x64.zip",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/llama-b11871-bin-win-cuda-12.4-x64.zip",
-      "sha256": "ab901a45d4315e3c074bde7cf505c86a8c6261fab97099683e1de666c3370ee9",
+      "name": "llama-b12359-bin-win-cuda-12.4-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-win-cuda-12.4-x64.zip",
+      "sha256": "e9c0abf442e8339c06728366c1ad2c711332f9939c0c00603fb75d85fd44c914",
       "destination": "downloads/bin/llama-cuda.zip",
       "extract_to": "runtime/bin/llama-cuda"
     },
     {
       "group": "runtime",
       "name": "cudart-llama-bin-win-cuda-12.4-x64.zip",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/cudart-llama-bin-win-cuda-12.4-x64.zip",
       "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
       "destination": "downloads/bin/llama-cudart.zip",
       "extract_to": "runtime/bin/llama-cuda"
     },
     {
       "group": "runtime",
-      "name": "llama-b11871-bin-win-vulkan-x64.zip",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11871/llama-b11871-bin-win-vulkan-x64.zip",
-      "sha256": "34a0366b9d9d22d09a58dd2958570f2549568067f3f15de771fc1909e888dd80",
+      "name": "llama-b12359-bin-win-vulkan-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-win-vulkan-x64.zip",
+      "sha256": "e8d18c6e4210cca87e7307c2ea78363ac8d158e4e1397358ec96ab70b53a0d5e",
       "destination": "downloads/bin/llama-vulkan.zip",
       "extract_to": "runtime/bin/llama-vulkan"
     },
@@ -59,17 +59,17 @@
     },
     {
       "group": "clone",
-      "name": "audio-v0.9.2-bin-windows-x64-cuda12.4.zip",
-      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-bin-windows-x64-cuda12.4.zip",
-      "sha256": "099bd43b74a5175fd9e03ac95c9fabe8b97718826d547890a03950483e81b168",
+      "name": "audio-v0.9.5-bin-windows-x64-cuda12.4.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.5/audio-v0.9.5-bin-windows-x64-cuda12.4.zip",
+      "sha256": "81f38a0a62935bdf4b2605541a21d50223b2e12b661887031705dd8a369f844b",
       "destination": "downloads/bin/audiocpp-cuda.zip",
       "extract_to": "runtime/bin/audiocpp-cuda"
     },
     {
       "group": "clone",
-      "name": "audio-v0.9.2-cudart-windows-x64-cuda12.4.zip",
-      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2/audio-v0.9.2-cudart-windows-x64-cuda12.4.zip",
-      "sha256": "50e278d213daa38e782a10b501b764c5c0738381898dacee7243101b890eeb0d",
+      "name": "audio-v0.9.5-cudart-windows-x64-cuda12.4.zip",
+      "url": "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.5/audio-v0.9.5-cudart-windows-x64-cuda12.4.zip",
+      "sha256": "fa55dfaff1d4b5c6e8fac460d64f380b9df76cd46435f187c39b05700f623a7e",
       "destination": "downloads/bin/audiocpp-cudart.zip",
       "extract_to": "runtime/bin/audiocpp-cuda"
     },

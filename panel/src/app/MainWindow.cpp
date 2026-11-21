@@ -32,7 +32,6 @@
 #include <QSignalBlocker>
 #include <QSizeGrip>
 #include <QSplitter>
-#include <QStyle>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QUuid>
@@ -40,6 +39,17 @@
 #include <windows.h>
 
 using namespace VoicePanel;
+
+namespace {
+QString nearestEdge(const QRect &bounds, const QRect &area, int snapDistance = -1) {
+    const QList<QPair<int, QString>> edges{
+        {qAbs(bounds.top() - area.top()), "top"}, {qAbs(bounds.bottom() - area.bottom()), "bottom"},
+        {qAbs(bounds.left() - area.left()), "left"}, {qAbs(bounds.right() - area.right()), "right"}};
+    auto nearest = edges.first();
+    for (const auto &edge : edges) if (edge.first < nearest.first) nearest = edge;
+    return snapDistance < 0 || nearest.first < snapDistance ? nearest.second : QString();
+}
+}
 
 MainWindow::MainWindow(PanelApp *app, QWidget *parent) : QMainWindow(parent), app_(app) {
     setWindowTitle(tr("VoicePanel"));
@@ -89,9 +99,9 @@ MainWindow::MainWindow(PanelApp *app, QWidget *parent) : QMainWindow(parent), ap
         // result pane. Automatic insertion only sends processed batches, so it
         // never reaches the target as if it were corrected or translated.
         processingLabel_->setText(
-            (app_->settings()->autoTranslate ? tr("Translation stopped: %1") : tr("Correction stopped: %1")).arg(error)
+            (app_->settings()->autoTranslate ? tr("Translation pending: %1") : tr("Correction pending: %1")).arg(error)
             + "\n" + tr("The unprocessed text is kept at the end of the result and is not inserted automatically. "
-                        "After recording, right-click and choose Retry correction, or review and copy it."));
+                        "The next phrase retries processing. You can also choose Retry correction after recording."));
         showExpanded();
     });
     connect(&statusTimer_, &QTimer::timeout, this, &MainWindow::updateServiceStatus);
@@ -112,6 +122,7 @@ MainWindow::MainWindow(PanelApp *app, QWidget *parent) : QMainWindow(parent), ap
     });
     if (!app_->settings()->compactGeometry.isEmpty()) restoreGeometry(app_->settings()->compactGeometry);
     else {
+        updateDockLayout();
         const QRect area = screen()->availableGeometry();
         move(area.center().x() - width() / 2, area.bottom() - height() - 24);
     }
@@ -144,14 +155,14 @@ void MainWindow::buildUi() {
     compactBar_->installEventFilter(this);
     compactBar_->setCursor(Qt::SizeAllCursor);
     barLayout_ = new QHBoxLayout(compactBar_);
-    barLayout_->setContentsMargins(16, 10, 16, 10);
+    barLayout_->setContentsMargins(8, 8, 8, 8);
     barLayout_->setSpacing(8);
     placementButton_ = new QPushButton;
     placementButton_->setObjectName("placementButton");
     placementButton_->setProperty("variant", "ghost");
     placementButton_->setProperty("size", "icon");
     placementButton_->setIcon(UiKit::icon("grip"));
-    placementButton_->setToolTip(tr("Drag to move. Click for placement. Double-click to snap to the nearest edge."));
+    placementButton_->setToolTip(tr("Drag to move or snap to an edge. Click for placement. Double-click to snap to the nearest edge."));
     placementButton_->setAccessibleName(tr("Panel placement"));
     placementButton_->installEventFilter(this);
     barLayout_->addWidget(placementButton_);
@@ -167,21 +178,14 @@ void MainWindow::buildUi() {
         toggleDictation(app_->settings()->reviewBeforeInsert || !app_->settings()->quickInsert);
     });
     barLayout_->addWidget(micButton_);
-    langLabel_ = new QLabel(tr("Auto language"));
-    langLabel_->setProperty("role", "muted");
-    langLabel_->installEventFilter(this);
-    barLayout_->addWidget(langLabel_);
-    statusLabel_ = new QLabel(tr("Connecting…"));
-    statusLabel_->setObjectName("serviceStatus");
-    statusLabel_->setProperty("role", "caption");
-    statusLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    statusLabel_->installEventFilter(this);
-    barLayout_->addWidget(statusLabel_, 1);
-    expandButton_ = new QPushButton(tr("Preview"));
+    panelStatus_ = tr("Connecting…");
+    expandButton_ = new QPushButton;
     expandButton_->setObjectName("previewButton");
     expandButton_->setProperty("variant", "ghost");
+    expandButton_->setProperty("size", "icon");
     expandButton_->setIcon(UiKit::icon("eye"));
     expandButton_->setToolTip(tr("Open or collapse transcript preview"));
+    expandButton_->setAccessibleName(tr("Preview"));
     connect(expandButton_, &QPushButton::clicked, this, [this]() {
         expanded_ ? showCompact() : showExpanded();
     });
@@ -281,12 +285,11 @@ void MainWindow::buildUi() {
     hideButton->setToolTip(tr("Hide to tray"));
     connect(hideButton, &QPushButton::clicked, this, &QWidget::hide);
     barLayout_->addWidget(hideButton);
-    for (auto *button : {placementButton_, settingsButton_, hideButton}) {
+    for (auto *button : {placementButton_, expandButton_, settingsButton_, hideButton}) {
         button->setFixedSize(36, 36);
         button->setIconSize(QSize(20, 20));
         button->setFocusPolicy(Qt::NoFocus);
     }
-    expandButton_->setIconSize(QSize(20, 20));
     rootLayout_->addWidget(compactBar_);
 
     editorPage_ = new QWidget(this, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
@@ -507,7 +510,7 @@ void MainWindow::startNewTranscript() {
     reviewedConfirmed_ = false;
     updateOriginal();
     updateResult();
-    statusLabel_->setText(tr("New transcript after %1 s of silence").arg(app_->settings()->transcriptResetS));
+    setPanelStatus(tr("New transcript after %1 s of silence").arg(app_->settings()->transcriptResetS));
 }
 
 void MainWindow::updateOriginal() {
@@ -586,7 +589,7 @@ void MainWindow::startDictation(bool reviewMode) {
                             : settings->autoCleanEditor ? "auto_correct" : "dictation",
                             "general");
     recording_ = sessionActive_ = true;
-    statusLabel_->setText(tr("Listening…"));
+    setPanelStatus(tr("Listening…"));
     processingLabel_->setText(target_.isValid() ? tr("Target: %1").arg(target_.windowTitle)
                                                : tr("No target selected. Use Copy when ready."));
     updateActions();
@@ -598,7 +601,7 @@ void MainWindow::stopDictation() {
     finishing_ = true;
     transcriptTimer_.stop();
     sessionEndedAt_ = QDateTime::currentDateTime();
-    statusLabel_->setText(tr("Finishing…"));
+    setPanelStatus(tr("Finishing…"));
     updateMicrophone();
     updateActions();
     app_->dictation()->stop();
@@ -615,7 +618,7 @@ void MainWindow::cancelDictation() {
     previews_.clear();
     acceptedChanges_.clear();
     updateOriginal();
-    statusLabel_->setText(tr("Cancelled"));
+    setPanelStatus(tr("Cancelled"));
     updateMicrophone();
     updateActions();
 }
@@ -632,6 +635,7 @@ void MainWindow::onFinalTranscript(const QString &text, qreal seconds, int id) {
 
 void MainWindow::onProcessedBatch(const QString &original, const QString &result) {
     Q_UNUSED(original);
+    processingLabel_->clear();
     processedSoFar_ += (processedSoFar_.isEmpty() ? "" : " ") + result;
     updateResult();
     scheduleQuickInsert();
@@ -800,7 +804,7 @@ void MainWindow::translateResult() {
 void MainWindow::updateActions() {
     const bool hasText = !resultEdit_->toPlainText().trimmed().isEmpty();
     micButton_->setEnabled(!finishing_);
-    micButton_->setToolTip(recording_ ? tr("Stop recording") : tr("Start recording · %1").arg(app_->settings()->insertHotkey));
+    updateMicrophoneTooltip();
     // Settings stays reachable while a correction is in flight: a stuck request
     // must not lock the user out of the panel.
     settingsButton_->setEnabled(!recording_);
@@ -831,8 +835,17 @@ void MainWindow::updateMicrophone(double rms) {
     const double level = recording_ ? AudioMeter::normalized(rms) : 0;
     microphoneLevel_ = capturing ? microphoneLevel_ * 0.5 + level * 0.5 : 0;
     micButton_->setIcon(UiKit::microphoneIcon(microphoneLevel_, capturing));
-    micButton_->setToolTip(capturing && !recording_
-        ? tr("Recording a live session") : micButton_->toolTip());
+}
+
+void MainWindow::setPanelStatus(const QString &status) {
+    panelStatus_ = status;
+    updateMicrophoneTooltip();
+}
+
+void MainWindow::updateMicrophoneTooltip() {
+    const QString action = recording_ ? tr("Stop recording") : tr("Start recording · %1").arg(app_->settings()->insertHotkey);
+    const QString status = liveRecording_ && !recording_ ? tr("Recording a live session") : panelStatus_;
+    micButton_->setToolTip(action + '\n' + status);
 }
 
 void MainWindow::finishSession() {
@@ -841,7 +854,7 @@ void MainWindow::finishSession() {
     scheduleQuickInsert();
     if (insertTimer_.isActive()) return;
     finishing_ = false;
-    statusLabel_->setText(tr("Ready"));
+    setPanelStatus(tr("Ready"));
     updateActions();
     if (!sessionActive_) return;
     sessionActive_ = false;
@@ -986,32 +999,10 @@ void MainWindow::updateDockLayout() {
     compactBar_->setMinimumSize(0, 0);
     compactBar_->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
     barLayout_->setDirection(vertical ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
-    // Vertical rail: the buttons must stay centred in 52 px, so 8 px each side.
-    // Horizontal bar: space-4 (16 px) per the design tokens.
-    barLayout_->setContentsMargins(vertical ? 8 : 16, vertical ? 8 : 10,
-                                   vertical ? 8 : 16, vertical ? 8 : 10);
-    langLabel_->setVisible(!vertical);
-    statusLabel_->setVisible(!vertical);
-    expandButton_->setText(vertical ? QString() : tr("Preview"));
-    expandButton_->setMinimumSize(0, 0);
-    expandButton_->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-    expandButton_->setProperty("size", vertical ? "icon" : "default");
-    expandButton_->style()->unpolish(expandButton_);
-    expandButton_->style()->polish(expandButton_);
-    if (vertical) {
-        // The rail must size to its buttons: seven controls, one per row, plus
-        // the spacing and insets, or they are packed unevenly.
-        const int rows = 9;
-        const int spacing = 8;
-        const int barHeight = 2 * 8 + rows * 36 + (rows - 1) * spacing;
-        compactBar_->setFixedSize(52, barHeight);
-        setFixedSize(56, barHeight + 4);
-    } else {
-        compactBar_->setFixedHeight(52);
-        // Nine controls plus the status text need a little more room than the
-        // original six.
-        setFixedSize(720, 56);
-    }
+    const QSize barSize = barLayout_->sizeHint();
+    const QMargins margins = rootLayout_->contentsMargins();
+    compactBar_->setFixedSize(barSize);
+    setFixedSize(barSize + QSize(margins.left() + margins.right(), margins.top() + margins.bottom()));
 }
 
 void MainWindow::showCompact() {
@@ -1037,17 +1028,21 @@ void MainWindow::showExpanded() {
 }
 
 void MainWindow::setDockPosition(const QString &position) {
+    setDockPosition(position, nullptr);
+}
+
+void MainWindow::setDockPosition(const QString &position, QScreen *display) {
     app_->settings()->dockPosition = position;
     changingGeometry_ = true;
-    applyDockPosition();
+    applyDockPosition(display);
     changingGeometry_ = false;
     saveGeometrySettings();
 }
 
-void MainWindow::applyDockPosition() {
-    updateDockLayout();
-    QScreen *display = QGuiApplication::screenAt(frameGeometry().center());
+void MainWindow::applyDockPosition(QScreen *display) {
+    if (!display) display = QGuiApplication::screenAt(frameGeometry().center());
     if (!display) display = screen();
+    updateDockLayout();
     const QRect area = display->availableGeometry().adjusted(8, 8, -8, -8);
     QPoint point(qBound(area.left(), x(), qMax(area.left(), area.right() - width() + 1)),
                  qBound(area.top(), y(), qMax(area.top(), area.bottom() - height() + 1)));
@@ -1078,24 +1073,17 @@ void MainWindow::positionPreview() {
         point = QPoint(dock == "left" ? geometry().right() + 1 : x() - editorPage_->width(),
                        qBound(area.top(), geometry().center().y() - editorPage_->rect().center().y(), area.bottom() - editorPage_->height() + 1));
     } else {
-        editorPage_->setFixedWidth(width());
+        const int previewWidth = qMin(720, area.width());
+        editorPage_->setFixedWidth(previewWidth);
         const int below = area.bottom() - geometry().bottom();
         const int above = y() - area.top();
         const bool upwards = dock == "bottom" || (dock == "free" && below < 360 && above > below);
-        editorPage_->resize(width(), qMin(qMax(360, editorPage_->height()), upwards ? above : below));
-        point = QPoint(x(), upwards ? y() - editorPage_->height() : geometry().bottom() + 1);
+        editorPage_->resize(previewWidth, qMin(qMax(360, editorPage_->height()), upwards ? above : below));
+        const int previewX = qBound(area.left(), geometry().center().x() - editorPage_->rect().center().x(),
+                                    area.right() - previewWidth + 1);
+        point = QPoint(previewX, upwards ? y() - editorPage_->height() : geometry().bottom() + 1);
     }
     editorPage_->move(point);
-}
-
-QString MainWindow::nearestEdge() const {
-    const QRect area = screen()->availableGeometry();
-    const QList<QPair<int, QString>> edges{
-        {qAbs(y() - area.top()), "top"}, {qAbs(geometry().bottom() - area.bottom()), "bottom"},
-        {qAbs(x() - area.left()), "left"}, {qAbs(geometry().right() - area.right()), "right"}};
-    auto nearest = edges.first();
-    for (const auto &edge : edges) if (edge.first < nearest.first) nearest = edge;
-    return nearest.second;
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
@@ -1116,7 +1104,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
         placementTimer_.stop();
         dragArmed_ = dragging_ = false;
         placementButton_->setDown(false);
-        setDockPosition(nearestEdge());
+        setDockPosition(nearestEdge(geometry(), screen()->availableGeometry()));
         return true;
     }
     if (event->type() == QEvent::MouseButtonPress) {
@@ -1137,12 +1125,21 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     } else if (event->type() == QEvent::MouseButtonRelease && dragArmed_) {
         dragArmed_ = false;
         if (!dragging_) return watched != placementButton_;
-        dragging_ = false;
         placementButton_->setDown(false);
-        const QRect area = screen()->availableGeometry();
-        const bool nearEdge = qMin(qMin(qAbs(y() - area.top()), qAbs(geometry().bottom() - area.bottom())),
-                               qMin(qAbs(x() - area.left()), qAbs(geometry().right() - area.right()))) < 25;
-        setDockPosition(nearEdge ? nearestEdge() : QString("free"));
+        const QPoint drop = static_cast<QMouseEvent *>(event)->globalPosition().toPoint();
+        move(drop - dragOffset_);
+        dragging_ = false;
+        QScreen *display = QGuiApplication::screenAt(drop);
+        if (!display) display = screen();
+        const QRect area = display->availableGeometry();
+        // The cursor may sit over the taskbar, so the whole screen is the first
+        // target; the window's own bounds are the fallback for a drop far from
+        // the edge.
+        constexpr int snapDistance = 25;
+        const QRect cursor(drop, QSize(1, 1));
+        QString edge = nearestEdge(cursor, display->geometry(), snapDistance);
+        if (edge.isEmpty()) edge = nearestEdge(geometry(), area, snapDistance);
+        setDockPosition(edge.isEmpty() ? QString("free") : edge, display);
         return true;
     }
     return false;
@@ -1162,7 +1159,7 @@ void MainWindow::updateServiceStatus() {
     app_->service()->getJson("/health", [self](bool ok, QByteArray body, QString) {
         if (!self || self->recording_ || self->finishing_) return;
         const bool ready = ok && QJsonDocument::fromJson(body).object().value("status").toString() == "ok";
-        self->statusLabel_->setText(ready ? self->tr("Ready") : self->tr("Service offline"));
+        self->setPanelStatus(ready ? self->tr("Ready") : self->tr("Service offline"));
         self->micButton_->setAccessibleDescription(ready ? self->tr("Local service connected") : self->tr("Local service offline"));
     });
 }

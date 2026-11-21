@@ -68,7 +68,7 @@ def _log_effective_profile(cfg: dict) -> None:
             binary = (backends.get("llama") or {}).get("binary", "")
             extra = f"gpu_layers={(backends.get('llama') or {}).get('gpu_layers')}"
         else:
-            key = {"clone": "audiocpp_clone", "diar": "audiocpp_diar"}.get(group, "audiocpp")
+            key = compute.clone_section(cfg) if group == "clone" else {"diar": "audiocpp_diar"}.get(group, "audiocpp")
             binary = (backends.get(key) or {}).get("binary", "")
             extra = str((backends.get(key) or {}).get("backend", ""))
         detail.append(f"{group}={device} ({Path(str(binary)).parent.name}/{extra})")

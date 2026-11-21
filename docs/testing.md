@@ -49,3 +49,49 @@ For repeatable speed, resource and quality numbers, use `tools/bench/run_bench.p
 For user-facing latency (speech end to inserted text), start the panel with `VOICEPANEL_TIMING_LOG` set to a file path, dictate with the protocol in [Performance audit](performance-audit.md#panel-end-to-end-latency-windows), and analyze the log with `tools/bench/panel_timing.py`. Without the variable the panel writes nothing. Commands and acceptance criteria are in [Performance audit](performance-audit.md#9-local-benchmark-instructions). Results stay under `runtime/logs/bench/`.
 
 The panel's opt-in inference test needs a local `live-fixture.wav` in `panel/build`. The interactive dictation test needs a dedicated Notepad document and explicit test environment variables documented in its source. Those tests are skipped in normal model-free CI. Keep their logs and fixtures local.
+
+The long meeting and caption acceptance runs replay local fixtures against a running service. From the repository root, with the service on its default address:
+
+```powershell
+$env:QTEST_FUNCTION_TIMEOUT = 1200000
+$env:VOICEPANEL_MEETING_BENCH = "http://127.0.0.1:8080"
+.\panel\build\bin\VoicePanelTests.exe -o runtime\logs\meeting-long.txt,txt meetingLongRecordingKeepsSpeakersAndLatency
+$env:VOICEPANEL_SUBTITLES_BENCH = "http://127.0.0.1:8080"
+.\panel\build\bin\VoicePanelTests.exe -o runtime\logs\subtitles-long.txt,txt subtitlesLongRecordingKeepsSpeakersAndLatency
+```
+
+They need `runtime/bench/meeting-long-16k.wav` and `runtime/bench/meeting-3voices-16k.wav` and take several minutes each. Each writes its per-phrase report under `runtime/reports/`. Without the fixture or the variable the test is skipped, not passed.
+
+The caption run first diarises the whole fixture in one request and uses that as the acceptance reference. Every phrase is then scored against the voice the reference says is speaking; the test fails unless the three voices land on three distinct labels, each voice keeps its label on at least 80 % of its captioned phrases, no label first appears after the first third, and per-phrase latency does not grow. `runtime/reports/subtitles-long/result.json` records the voice-to-label counts next to the per-phrase timings.
+
+### Transcript quality
+
+The same run scores the words against a human transcript. `runtime/bench/meeting-3voices-ref.json` is the AMI `ami_en2002d_2132` word-level annotation looped with the fixture audio (60 s clip, 61.2 s period); build it once with:
+
+```powershell
+python tools\bench\transcript_quality.py reference `
+  --annotation runtime\bench\nemo-src\test_files\diar\ami_en2002d_2132.json `
+  --period 61.2 --duration 600 --out runtime\bench\meeting-3voices-ref.json
+```
+
+The report's `quality` block carries WER, CER, the share of the room's speech that reached a caption, lost human turns, phrases that came back without words, speaker-name accuracy (best label-to-person mapping) and term recall (the user's glossary words the recording contains plus its own frequent content words). A turn is lost when fewer than half of its words appear in the captions over its span (`lost_phrases.recall_threshold`); timing overlap alone would always read zero, because captions sit wall to wall. `missing_word_share` reports the share of checked words no caption echoes. The test fails below 60 % covered speech, above 30 % lost turns, above 25 % empty captions, or below 80 % correct names. Per-phrase rows also carry `start_s`, `end_s` and the recognised `text`, so a report can be scored again without rerunning the audio:
+
+```powershell
+python tools\bench\transcript_quality.py score --report runtime\reports\subtitles-long\result.json
+```
+
+### Offline re-pass
+
+`offline` reworks a saved recording: one whole-file diarisation request, re-recognition, a cleanup pass with meeting notes and the context document, and a Markdown transcript with speaker names (replaced in code, not by the model). It prints the same metrics for the live run and for the offline reading, and writes `offline.json` and `final.md` under `runtime/reports/subtitles-long/`:
+
+```powershell
+python tools\bench\transcript_quality.py offline `
+  --wav runtime\bench\meeting-3voices-16k.wav `
+  --reference runtime\bench\meeting-3voices-ref.json `
+  --live runtime\reports\subtitles-long\result.json `
+  --notes runtime\bench\meeting-notes.md `
+  --names "speaker_0=Лёша,speaker_1=Женя,speaker_2=Nik" `
+  --out runtime\reports\subtitles-long
+```
+
+The pass measures two readings of the same audio, one ASR request per diarised turn and one per contiguous 12 s block, then the cleaned paragraphs, so short-window ASR loss and cleanup's effect stay separate numbers. Cleanup runs the model on every paragraph only when the service config sets `llm.skip_if_clean: false`; with the default, a paragraph without a dictionary or spell-checker hit comes back untouched and the tool prints how many were skipped instead of reporting a cleanup. `--source turns|blocks` picks which reading becomes the document: per turn keeps names sharp, while a block is labelled with one person even when two speak inside it. `--cache` reuses recognised chunks under `runtime/bench/`, so changing the cleanup or the notes does not re-run recognition.

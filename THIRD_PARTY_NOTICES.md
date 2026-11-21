@@ -28,7 +28,7 @@ These components are not included as binary artifacts in this source repository:
 | Component | Upstream and license reference |
 |---|---|
 | audio.cpp | [0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp), Apache-2.0 |
-| omnivoice.cpp | [k2-fsa/OmniVoice](https://github.com/k2-fsa/OmniVoice) engine (built from source, not redistributed), Apache-2.0; its OmniVoice model weights are CC-BY-NC 4.0 and must be downloaded separately |
+| omnivoice.cpp | [ServeurpersoCom/omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp), built from source, MIT; see the retained [license](licenses/OmniVoice.cpp-MIT.txt). The separate [k2-fsa/OmniVoice](https://github.com/k2-fsa/OmniVoice) model weights are CC-BY-NC 4.0 and must be downloaded separately |
 | llama.cpp | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp), MIT |
 | whisper.cpp | [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp), MIT |
 | Silero VAD | [snakers4/silero-vad](https://github.com/snakers4/silero-vad), MIT |
@@ -36,5 +36,9 @@ These components are not included as binary artifacts in this source repository:
 | Qt | [Qt licensing](https://www.qt.io/licensing/), terms depend on the modules and distribution |
 
 Python dependency versions are declared in `service/requirements.txt`. Their upstream licenses remain applicable. Downloaded model repositories and voice datasets have separate model cards and license terms. Check those terms before using or redistributing weights, generated audio or a packaged runtime. This repository's MIT license grants no rights to a third party's voice.
+
+Binary packages retain [Qt LGPL 3.0](licenses/Qt-LGPL-3.0.txt), [GPL 3.0](licenses/GPL-3.0.txt), the [ONNX Runtime license](licenses/ONNX-Runtime-MIT.txt) and [third-party notices](licenses/ONNX-Runtime-ThirdPartyNotices.txt), and the [NVIDIA CUDA license agreement](licenses/NVIDIA-CUDA-EULA.txt). The native HTTP runtime includes [ggml](licenses/OmniVoice-ggml-MIT.txt), [cpp-httplib](licenses/cpp-httplib-MIT.txt) and [yyjson](licenses/yyjson-MIT.txt), all under MIT terms. Engine archive notices travel with their runtime directories.
+
+The dynamically linked eSpeak NG runtime is GPL-3.0-or-later; its source is available from [espeak-ng](https://github.com/espeak-ng/espeak-ng). Qt 6.8.3 sources are available from [Qt](https://github.com/qt/qtbase/tree/v6.8.3); VoicePanel sources and build instructions are provided in this repository. Model weights and voice recordings are not included in the public Windows archive.
 
 `tools/downloads.lock.json` records pinned download URLs and SHA-256 values. Integrity verification confirms that the bytes match the reviewed lock; it does not certify the security of upstream software or models. Any binary distribution must preserve the relevant upstream notices and meet its dependency license obligations.

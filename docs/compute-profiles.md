@@ -5,7 +5,7 @@ VoicePanel routes work to separate supervised inference processes. Settings in t
 | Work | Process | Configuration |
 |---|---|---|
 | Main ASR and built-in speech | audio.cpp | `backends.audiocpp.binary`, `backend`, `device` |
-| Voice cloning (default) | omnivoice.cpp CLI | `backends.omnivoice.binary`, `codec_binary`, `backend` |
+| Speech and voice cloning (native choice) | omnivoice.cpp HTTP server | `backends.omnivoice.binary`, `codec_binary`, `backend`, `port` |
 | Voice cloning (alternative) | separate audio.cpp helper | `backends.audiocpp_clone.enabled`, `binary`, `backend`, `device` |
 | Correction and translation | llama.cpp | `backends.llama.binary`, `gpu_layers` |
 | Speaker separation | separate audio.cpp helper | `backends.audiocpp_diar.binary`, `backend`, `device` |
@@ -23,7 +23,8 @@ backends:
     binary: runtime/bin/audiocpp-cpu/audiocpp_server.exe
     backend: cpu
   omnivoice:
-    binary: runtime/bin/omnivoice-cpu/omnivoice-tts.exe
+    binary: runtime/bin/omnivoice-cpu/tts-server.exe
+    port: 8107
     codec_binary: runtime/bin/omnivoice-cpu/omnivoice-codec.exe
     backend: cpu
   llama:
@@ -57,11 +58,15 @@ serves a request.
 
 ## Cloned speech
 
-A reference profile contains an audio file and transcript. Creating a profile does not train a model. The OmniVoice engine pre-encodes each profile's reference once into a tiny `.rvq` beside the WAV, then synthesizes with it; a voice switch restarts the engine with that reference. Record or import only voices you have permission to use. Reference files remain under the ignored runtime directory.
+A reference profile contains an audio file and transcript. Creating a profile does not train a model. The OmniVoice engine pre-encodes each profile's reference once into a small `.rvq` beside the WAV, then registers it with the native HTTP server. Voice, language and design changes reuse the loaded model. Replacing a reference WAV rebuilds its cached codes. The legacy `omnivoice-tts.exe` path still works, but changes to voice, language or design restart that process. Record or import only voices you have permission to use. Reference files remain under the ignored runtime directory.
+
+The `clone` compute group follows the selected cloning model in the native engine, the audio.cpp helper or the main audio.cpp process. When cloning shares the main process, both groups share one device. The `llm` choice applies to both correction and the separate translator. CPU requests explicitly send `-ngl 0` to llama.cpp.
+
+Voice design controls in Settings and Voice playback follow `/v1/models` metadata. Piper and Kokoro hide those controls. Native HTTP OmniVoice supports seed and the voice attributes reported by the API; its generation steps are fixed at 32 upstream. The legacy CLI supports configurable steps. A saved voice profile and voice design are separate choices for each request. Inactive design preferences remain saved when selecting another engine.
 
 The engine process starts on demand and stops after its configured idle period (`backends.omnivoice.idle_stop_s`), releasing ~1 GB of RAM or the corresponding VRAM on the CUDA build.
 
-The qwen3-tts-clone alternative (audio.cpp helper, 2 GB model, ru/en + 8 languages, ~6.4 GB VRAM peak) is configured in the sample but disabled; see [Models](models.md#cloning-engine) for the swap.
+The qwen3-tts-clone alternative (audio.cpp helper, 2 GB model, ru/en + 8 languages, ~6.4 GB VRAM peak in the earlier test) is configured in the sample but disabled; see [Models](models.md#cloning-engine) for the swap. Qwen conditioning and OmniVoice RVQ codes are model-specific. The stored WAV and transcript can be reused across engines; the target engine still needs its own TTS model.
 
 ## Text processing
 

@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..backends import Registry
-from ..processing import MODES, PROFILES, build_messages, deterministic_pass
+from ..processing import LOQIRA_GEC_PROMPT, MODES, PROFILES, build_messages, deterministic_pass
 from .deps import get_registry
 
 router = APIRouter()
@@ -95,7 +95,13 @@ async def process_text(
     # `context` / `glossary` kwargs instead. Enabled per backend via
     # `template_style: plamo` in the backend config.
     plamo_style = str(llm.cfg.get("template_style", "")).lower() == "plamo"
-    if plamo_style:
+    gec_style = llm.cfg.get("template_style") == "loqira_gec" and req.mode in CORRECT_MODES and not req.explain
+    if gec_style:
+        messages = [
+            {"role": "system", "content": LOQIRA_GEC_PROMPT},
+            {"role": "user", "content": text_for_model},
+        ]
+    elif plamo_style:
         messages = [{"role": "user", "content": text_for_model}]
     else:
         messages = build_messages(
@@ -113,13 +119,6 @@ async def process_text(
             " the corrections you made (grammar, wording, punctuation). If none, write"
             " 'No changes needed' after the divider."
         )
-
-    # Without a client limit a repetition loop would generate until the context
-    # is full: minutes of CPU time while the dictation queue waits behind it.
-    # The derived cap is generous (see default_max_tokens) and applies only
-    # when the client sent no max_tokens.
-    derived_cap = req.max_tokens is None
-    max_tokens = req.max_tokens if not derived_cap else default_max_tokens(req.text, explain=req.explain)
 
     # Correction is a minimal-edit task: sampling only adds invented rewrites.
     if req.temperature is None:
@@ -143,33 +142,28 @@ async def process_text(
             ctk["context"] = req.context
         if req.dictionary:
             ctk["glossary"] = [{"source": t, "target": t} for t in req.dictionary[:100]]
+    completion_options = {"temperature": temperature, "chat_template_kwargs": ctk}
+    if req.max_tokens is not None:
+        completion_options["max_tokens"] = req.max_tokens
     try:
         async with registry._llm_semaphore:
             data = await llm.complete(
                 messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                # Qwen3.5 reasons before answering unless told otherwise: that
-                # put 20 s of thinking and an empty result behind every sentence.
-                chat_template_kwargs=ctk,
+                **completion_options,
             )
     except Exception as exc:  # noqa: BLE001 - surfaced as 502 with detail
         raise HTTPException(502, f"text processing failed: {exc}")
 
     choice = (data.get("choices") or [{}])[0]
-    if derived_cap and choice.get("finish_reason") == "length":
-        # The model ran into the safety cap: its output is a loop or a cut-off
-        # rewrite. That is a failure, not a result: answering 200 with the
-        # input would let a client insert untranslated text as a translation.
-        # The original travels back so no client loses dictated words.
+    if req.max_tokens is None and choice.get("finish_reason") == "length":
+        # A backend that did not finish must not pass a partial translation as
+        # complete. Keep the original without imposing a service output cap.
         return JSONResponse(
             {
                 "detail": (
-                    f"text processing stopped at the generation limit ({max_tokens} tokens); "
-                    "the text was not processed"
+                    "the text model returned an incomplete response; the original text was kept"
                 ),
-                "reason": "generation_limit",
-                "max_tokens": max_tokens,
+                "reason": "incomplete_generation",
                 "original": req.text,
             },
             status_code=502,
@@ -198,21 +192,6 @@ async def process_text(
             "usage": data.get("usage"),
         }
     )
-
-
-def default_max_tokens(text: str, *, explain: bool = False) -> int:
-    """Generation cap used when a request does not set max_tokens.
-
-    Byte-level BPE tokenizers (Qwen, Llama) emit at most one token per UTF-8
-    byte, so a correction of the same length as its input stays below the
-    byte count. Measured with the Qwen vocabulary on RU/EN technical text
-    (docs/performance-audit.md, "Generation cap"): the needed output was at
-    most 57 % of the byte count in every direction, including digit-heavy
-    text, where Qwen spends one token per digit. A cap of half the character
-    count, used before, fell below the needed length for long Russian and
-    number-heavy text. The fixed margin covers short inputs and formatting.
-    """
-    return len(text.encode("utf-8")) + (384 if explain else 128)
 
 
 def _strip_wrapping_quotes(text: str) -> str:

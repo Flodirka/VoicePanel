@@ -116,6 +116,65 @@ def test_stream_reports_an_engine_failure_without_dropping_the_socket(client: Te
 
 
 # ------------------------------------------------------------------- client
+def test_partial_arrives_before_audio_upload_finishes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        partial_seen = asyncio.Event()
+        received = []
+
+        async def engine(reader, writer):
+            try:
+                while True:
+                    header = await reader.readline()
+                    if not header:
+                        return
+                    if header == b"\r\n":
+                        break
+                size = int(await reader.readline(), 16)
+                received.append(await reader.readexactly(size))
+                await reader.readexactly(2)
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                event = b'data: {"type":"transcript.text.delta","delta":"early"}\n\n'
+                # An event may straddle HTTP chunks.
+                for part in (event[:17], event[17:]):
+                    writer.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+                await writer.drain()
+                while True:
+                    size = int(await reader.readline(), 16)
+                    if size == 0:
+                        await reader.readline()
+                        break
+                    received.append(await reader.readexactly(size))
+                    await reader.readexactly(2)
+                writer.write(b"e\r\ndata: [DONE]\n\n\r\n0\r\n\r\n")
+                await writer.drain()
+            except (ConnectionError, asyncio.IncompleteReadError, ValueError):
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(engine, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        cfg = {**load_config(None)["backends"]["audiocpp"], "port": port}
+        backend = AudioCppBackend(cfg, tmp_path, tmp_path / "logs")
+        backend.proc._owned_and_healthy = lambda: True
+
+        async def chunks():
+            yield b"first audio"
+            await partial_seen.wait()
+            yield b"last audio"
+
+        try:
+            async with server, asyncio.timeout(2):
+                async for line in backend.transcribe_live(chunks(), model="nemotron"):
+                    if "early" in line:
+                        partial_seen.set()
+            assert partial_seen.is_set()
+            assert b"".join(received) == b"first audiolast audio"
+        finally:
+            await backend.proc._close_http()
+    asyncio.run(scenario())
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -178,6 +237,25 @@ def test_transcribe_live_streams_pcm_and_reads_events(tmp_path: Path) -> None:
     assert query["language"] == "ru-RU"
     assert any("transcript.text.done" in line for line in lines)
     assert any("[DONE]" in line for line in lines)
+
+
+def test_live_connection_reset_is_reported_as_an_engine_failure(tmp_path: Path, monkeypatch) -> None:
+    backend = AudioCppBackend(load_config(None)["backends"]["audiocpp"], tmp_path, tmp_path / "logs")
+    backend.proc._owned_and_healthy = lambda: True
+
+    async def reset_connection(*args, **kwargs):
+        raise ConnectionResetError("engine disconnected")
+
+    async def chunks():
+        yield b"\x00\x00"
+
+    async def scenario():
+        async for _ in backend.transcribe_live(chunks(), model="nemotron"):
+            pass
+
+    monkeypatch.setattr(asyncio, "open_connection", reset_connection)
+    with pytest.raises(RuntimeError, match="live transcription failed"):
+        asyncio.run(scenario())
 
 
 def test_transcribe_live_surfaces_engine_errors(tmp_path: Path) -> None:

@@ -94,11 +94,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--group", choices=("runtime", "extras", "clone"), default="runtime")
     parser.add_argument("--verify-only", action="store_true", help="check cached downloads without extracting or fetching")
+    parser.add_argument("--list", action="store_true", help="list locked artifacts without downloading")
+    parser.add_argument("--artifact", action="append", default=[], help="download only this locked artifact name; repeat for several files")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     lock = json.loads((root / "tools/downloads.lock.json").read_text(encoding="utf-8"))
-    for entry in lock["downloads"]:
-        if entry["group"] != args.group:
+    entries = [entry for entry in lock["downloads"] if entry["group"] == args.group]
+    unknown = set(args.artifact) - {entry["name"] for entry in entries}
+    if unknown:
+        parser.error("unknown artifact(s) in this group: " + ", ".join(sorted(unknown)))
+    if args.artifact:
+        entries = [entry for entry in entries if entry["name"] in args.artifact]
+    for entry in entries:
+        if args.list:
+            print(entry["name"])
             continue
         destination = inside(root, entry["destination"])
         print(("Checking: " if args.verify_only else "Preparing: ") + entry["name"], flush=True)
@@ -108,7 +117,8 @@ def main() -> None:
         download_file(entry["url"], destination, entry["sha256"])
         if entry.get("extract_to"):
             extract_archive(destination, inside(root, entry["extract_to"]), entry.get("strip_prefix", ""))
-    print("Verified. No downloaded program was executed.")
+    if not args.list:
+        print("Verified. No downloaded program was executed.")
 
 
 if __name__ == "__main__":

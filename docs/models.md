@@ -6,6 +6,8 @@ is a config edit — the panel and the API contract do not change.
 
 ## How the pipeline is wired
 
+The [2026-11-17 runtime audit](runtime-update-2026-11-17.md) supersedes the early-November performance figures below. The current native OmniVoice path uses `tts-server.exe` and keeps its model across voice, language and design changes. Qwen3-TTS remains a selectable audio.cpp alternative.
+
 ```text
 microphone / loopback audio
    └─ ASR            audiocpp · nemotron (default) or whisper        [main group, CPU/GPU]
@@ -75,8 +77,10 @@ switch swaps to the CUDA build when `runtime/bin/omnivoice-cuda/` exists).
 
 To use the bigger qwen3-tts-clone instead: enable `backends.audiocpp_clone`,
 disable `backends.omnivoice`, and set `tts.clone_model: qwen3-tts-clone`.
-Existing profiles keep the model they were created with; PATCH
-`/v1/voices/{id}` with `model=` to move a profile between engines.
+Profiles retain their original model metadata. If that engine is disabled,
+the service uses the selected cloning model with the stored WAV and transcript.
+An explicit cloning-capable `model` overrides the profile's model per request.
+PATCH `/v1/voices/{id}` with `model=` to change the stored preference.
 
 ### Translator
 

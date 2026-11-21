@@ -19,8 +19,28 @@ def _builds(root: Path, variants: list[tuple[str, str]]) -> None:
 
 
 AUDIOCPP = [("audiocpp-cpu", "audiocpp_server.exe"), ("audiocpp-cuda", "audiocpp_server.exe")]
-OMNIVOICE = [("omnivoice-cpu", "omnivoice-tts.exe"), ("omnivoice-cuda", "omnivoice-tts.exe")]
+OMNIVOICE = [("omnivoice-cpu", "tts-server.exe"), ("omnivoice-cuda", "tts-server.exe")]
 LLAMA = [("llama-vulkan", "llama-server.exe"), ("llama-cuda", "llama-server.exe")]
+
+
+def test_alternative_clone_switches_its_actual_process(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VOICE_SERVICE_AUTH_TOKEN", "")
+    _builds(tmp_path, AUDIOCPP)
+    config = tmp_path / "config.yaml"
+    config.write_text("backends:\n  omnivoice:\n    enabled: false\n  audiocpp_clone:\n    enabled: true\n    backend: cpu\n    binary: runtime/bin/audiocpp-cpu/audiocpp_server.exe\n", encoding="utf-8")
+    app = create_app(config)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        reg = app.state.registry
+        reg.audiocpp_clone.proc._leases = 1
+        assert client.post("/admin/compute", json={"devices": {"clone": "gpu"}}).status_code == 409
+        reg.audiocpp_clone.proc._leases = 0
+        resp = client.post("/admin/compute", json={"devices": {"clone": "gpu"}})
+        assert resp.status_code == 200, resp.text
+        group = next(g for g in resp.json()["groups"] if g["id"] == "clone")
+        assert group["process"] == "audiocpp_clone" and group["device"] == "gpu"
+        assert reg.audiocpp_clone.cfg["backend"] == "cuda"
+        assert Path(reg.audiocpp_clone.cfg["binary"]).parent.name == "audiocpp-cuda"
+        assert reg.omnivoice is None
 
 
 @pytest.fixture()
@@ -50,6 +70,12 @@ def test_snapshot_lists_every_process(service) -> None:
     assert groups["diar"]["process"] == "audiocpp_diar"
     # Recognition and built-in voices are one process, so one choice covers both.
     assert "one process" in groups["main"]["label"]
+
+
+def test_cpu_language_model_explicitly_disables_gpu_offload(service) -> None:
+    client, _ = service
+    command = client.app.state.registry.llama.proc.command
+    assert command[command.index("-ngl") + 1] == "0"
 
 
 def test_diar_process_is_reported_and_switchable(service) -> None:

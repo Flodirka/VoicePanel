@@ -23,7 +23,7 @@ def client(tmp_path: Path, monkeypatch) -> TestClient:
     engine.parent.mkdir(parents=True)
     engine.write_bytes(b"")  # Existence-only fixture; never executed.
     config = tmp_path / "config.yaml"
-    config.write_text("service:\n  host: 127.0.0.1\nbackends:\n  llama_translate:\n    enabled: false\n", encoding="utf-8")
+    config.write_text("service:\n  host: 127.0.0.1\nbackends:\n  omnivoice:\n    binary: runtime/bin/omnivoice-cpu/omnivoice-tts.exe\n  llama_translate:\n    enabled: false\n", encoding="utf-8")
     app = create_app(config)
     with TestClient(app, base_url="http://127.0.0.1") as c:
         app.state.voices = VoiceStore(tmp_path / "voice-library")
@@ -34,6 +34,77 @@ def _wav_bytes(seconds: float = 3.0) -> bytes:
     from conftest import make_wav
 
     return make_wav(seconds)
+
+
+def test_models_report_per_engine_speech_parameters(client: TestClient) -> None:
+    models = {m["id"]: m for m in client.get("/v1/models").json()["data"]}
+    assert models["omnivoice-q8"]["speech_parameters"]["instructions"] is True
+    assert models["omnivoice-q8"]["speech_parameters"]["speed"] is False
+    assert models["piper-ru"]["speech_parameters"]["instructions"] is False
+    assert models["piper-ru"]["speech_parameters"]["speed"] is True
+
+
+def test_native_http_capabilities_match_the_request_validation(client: TestClient) -> None:
+    from voiceservice.backends.omnivoice import OmnivoiceHttpBackend
+
+    registry = client.app.state.registry
+    registry.omnivoice = OmnivoiceHttpBackend({**registry.omnivoice.cfg, "binary": "tts-server.exe"})
+    registry.cfg["tts"]["default"] = "omnivoice-q8"
+    data = client.get("/v1/models").json()
+    params = data["speech_aliases"]["auto"]["speech_parameters"]
+    assert params["options"] == ["seed"]
+    assert params["voice_design"]["gender"] == ["male", "female"]
+    response = client.post("/v1/audio/speech", json={
+        "input": "Hello.", "instructions": "female", "options": {"steps": 8},
+    })
+    assert response.status_code == 400, response.text
+    assert client.post("/admin/backends/omnivoice/unload").status_code == 200
+
+
+def test_speech_design_without_reference_and_neutral_speed(client: TestClient, monkeypatch) -> None:
+    calls = []
+    async def fake_speech(text, **kwargs):
+        calls.append(kwargs)
+        return _wav_bytes(1)
+    monkeypatch.setattr(client.app.state.registry.omnivoice, "speech", fake_speech)
+    resp = client.post("/v1/audio/speech", json={
+        "model": "omnivoice-q8", "input": "Hello.", "speed": 1.0,
+        "instructions": "female, low pitch", "options": {"steps": 8, "seed": 42},
+    })
+    assert resp.status_code == 200, resp.text
+    assert calls[0]["speed"] is None
+    assert calls[0]["options"] == {"instruct": "female, low pitch", "steps": 8, "seed": 42}
+
+
+def test_omnivoice_can_generate_automatic_voice_without_a_reference(client: TestClient, monkeypatch) -> None:
+    async def fake_speech(text, **kwargs):
+        assert kwargs["voice"] is None
+        return _wav_bytes(1)
+    monkeypatch.setattr(client.app.state.registry.omnivoice, "speech", fake_speech)
+    response = client.post("/v1/audio/speech", json={"model": "omnivoice-q8", "input": "Hello."})
+    assert response.status_code == 200, response.text
+
+
+def test_design_in_options_bypasses_a_saved_default_voice(client: TestClient, monkeypatch) -> None:
+    client.app.state.registry.cfg["tts"]["default_voices"]["en"] = "missing-profile"
+    async def fake_speech(text, **kwargs):
+        assert kwargs["voice"] is None
+        return _wav_bytes(1)
+    monkeypatch.setattr(client.app.state.registry.omnivoice, "speech", fake_speech)
+    response = client.post("/v1/audio/speech", json={"input": "Hello.", "options": {"instruct": "female"}})
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("body", [
+    {"model": "piper-ru", "instructions": "female"},
+    {"model": "omnivoice-q8", "instructions": "female", "speed": 1.5},
+    {"model": "omnivoice-q8", "instructions": "female, male"},
+    {"model": "omnivoice-q8", "instructions": "invented voice"},
+    {"model": "omnivoice-q8", "instructions": "female", "options": {"steps": 0}},
+])
+def test_unsupported_speech_parameters_are_client_errors(client: TestClient, body: dict) -> None:
+    resp = client.post("/v1/audio/speech", json={"input": "Hello.", **body})
+    assert resp.status_code == 400, resp.text
 
 
 def test_create_list_get_delete(client: TestClient) -> None:
@@ -59,7 +130,10 @@ def test_create_list_get_delete(client: TestClient) -> None:
     assert patched.json()["voice"]["name"] == "Renamed"
     assert patched.json()["voice"]["reference_text"] == "hello there"
 
+    for suffix in (".rvq", ".ref.txt"):
+        (client.app.state.voices.dir / ("panel-voice" + suffix)).write_bytes(b"cache")
     assert client.delete("/v1/voices/panel-voice").status_code == 200
+    assert not list(client.app.state.voices.dir.glob("panel-voice.*"))
     assert client.get("/v1/voices/panel-voice").status_code == 404
 
 

@@ -1,8 +1,15 @@
 #pragma once
 #include <QSettings>
+#include <QJsonObject>
 #include <QString>
 
 namespace VoicePanel {
+
+// Old builds stored "builtin" for "the engine's own voice" in the two voice
+// rows. A model is what names an engine now, so the placeholder means the same
+// as an empty row: the saved profile. Every reader goes through this one
+// conversion instead of handling the legacy value itself.
+QString normalizeVoiceSelection(const QString &saved);
 
 // All persistent panel preferences. Backed by QSettings (registry on Windows,
 // INI elsewhere); every VAD knob the specification asks for is represented.
@@ -24,7 +31,6 @@ struct Settings {
     int meetingLanguage = 0;           // 0 auto/mixed | 1 Russian | 2 English
     int liveOutgoing = 0;              // 0 translated | 1 verbatim | 2 captions only
     int callLanguage = 0;              // 0 the other side speaks English | 1 Russian
-    bool speakCaptions = false;        // subtitles overlay also speaks the translation
     int subtitlesLanguage = 0;         // 0 the captioned audio is English -> Russian | 1 the reverse
     QString language = "auto";         // auto | ru | en
     QString inputDevice;               // WASAPI capture device id ("" = default)
@@ -53,10 +59,12 @@ struct Settings {
 
     // TTS
     QString ttsModel = "auto";
-    QString ttsVoiceProfile;           // cloned voice profile id ("" = built-in)
-    QString ttsRussianVoice;           // "builtin" | profile id
-    QString ttsEnglishVoice;           // "builtin" | profile id
+    QString ttsVoiceProfile;           // saved cloned voice profile id ("" = none)
+    QString ttsRussianVoice;           // profile id for the Russian row ("" = saved profile)
+    QString ttsEnglishVoice;           // profile id for the English row ("" = saved profile)
     double ttsSpeed = 1.0;
+    QString ttsInstructions;
+    QJsonObject ttsOptions;
     int ttsPauseMs = 0;                // silence added between spoken sentences
     bool ttsEnabled = false;
 

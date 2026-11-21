@@ -13,7 +13,7 @@ If `service.auth_token` or `VOICE_SERVICE_AUTH_TOKEN` is set, send `Authorizatio
 ## Health and discovery
 
 - `GET /health`: gateway liveness, version and uptime. It does not load inference models.
-- `GET /v1/models`: configured logical model IDs and their capabilities.
+- `GET /v1/models`: configured logical model IDs and their capabilities. TTS entries include `engine` and `speech_parameters`: `speed`, `instructions`, `voice_cloning`, `voice_design` and `options`. `speech_aliases.auto` provides the descriptor when the default names one model and has no language-specific override.
 - `GET /v1/capabilities`: available speech and text capabilities, compute choices and process state.
 - `GET /v1/text/modes`: supported text modes and context profiles.
 
@@ -40,9 +40,17 @@ Use a synthetic or explicitly approved local recording. Nothing in the repositor
 {"input":"Hello. This is a local speech example.","model":"kokoro","voice":"af_heart","response_format":"wav"}
 ```
 
-`input` is required. `model` selects a configured speech model. A known voice-profile ID in `voice` selects that profile's cloning model. Otherwise the value is passed to the selected speech backend. `language` and `speed` are optional backend parameters (`speed` is not supported by the omnivoice engine and fails the request). `response_format` defaults to `wav`; `pcm` returns PCM16 samples and an `X-Sample-Rate` header. Cloning-capable engines accept `options.max_tokens` (an audio-token cap derived from the text length by default); the built-in VITS voices (Kokoro, Piper) reject it, so the service only sends it to the cloning models.
+`input` is required. `model` selects a configured speech model. A known voice-profile ID in `voice` uses its available cloning model, unless an explicit cloning-capable model overrides it. Profiles from a disabled engine use the configured cloning model. `language` and `speed` are optional. Native OmniVoice accepts neutral `speed: 1` without forwarding it; other speed values return 400. `response_format` defaults to `wav`; `pcm` returns PCM16 samples and an `X-Sample-Rate` header.
 
-For agent applications, the service selects a voice without panel settings: configure `tts.default_voices.en` and `tts.default_voices.ru` in `config.yaml` with IDs from `GET /v1/voices` **or with a built-in model id** (for example `piper-ru-female` to pick the female Russian voice over the male one), then restart the service. When both `voice` and a specific `model` are omitted, the configured default for the text's script is used. An explicit `voice` or specific `model` overrides the server default. An empty English default uses the built-in voice; an empty Russian default requires callers to pass a cloned voice profile. A deleted configured profile returns 503 rather than silently switching voices. Clients can send `{"input":"Привет"}` to use the Russian default or `{"input":"Hello","voice":"my-profile"}` to override it.
+`instructions` accepts comma-separated voice attributes from the selected model's `speech_parameters.voice_design`. For example:
+
+```json
+{"input":"Hello. This is a designed voice.","model":"omnivoice-q8","instructions":"female, young adult, low pitch","options":{"seed":42}}
+```
+
+Omit `voice` for voice design. A profile and design instructions in the same request return 400. Native OmniVoice can also synthesize an automatic voice without a profile. Supported options depend on the engine: native HTTP OmniVoice accepts `seed` (32 generation steps fixed upstream); the legacy CLI accepts `steps` and `seed`; audio.cpp OmniVoice accepts `num_inference_steps`, `guidance_scale` and `seed`; Qwen3-TTS accepts `max_tokens`. Piper and Kokoro reject these design options. Unsupported fields return 400 before calling the engine. Use discovery metadata instead of sending one parameter set to every model.
+
+For agent applications, configure `tts.default_voices.en` and `tts.default_voices.ru` with profile IDs from `GET /v1/voices` or built-in model IDs such as `piper-ru-female`, then restart the service. When both `voice` and a specific `model` are omitted, the configured language default is used. An explicit `voice`, specific `model` or design instructions override it. An empty language default uses `tts.default`, with language routing when it is `auto`. A deleted configured profile returns 503. Clients can send `{"input":"Привет"}` to use the Russian default or `{"input":"Hello","voice":"my-profile"}` to override it.
 
 The Russian defaults are the small Piper voices (male `piper-ru`, female `piper-ru-female`, both real-time on CPU); a cloned profile is selected explicitly and synthesizes through the OmniVoice engine.
 
@@ -81,13 +89,17 @@ Before the model runs, a deterministic pre-pass fixes near-miss renderings of `d
 
 Translation modes (`translate_ru_en`, `translate_en_ru`) use the optional `backends.llama_translate` backend when it is configured (a small specialist such as Hy-MT2-1.8B); correction modes and `dictation` always use `backends.llama`.
 
-When `max_tokens` is omitted or null, the service limits generation to the UTF-8 byte length of `text` plus 128 tokens (plus 384 with `explain`). Byte-level BPE tokenizers emit at most one token per byte, so a correction of the same length stays below this limit; measured RU/EN translations needed at most 57 % of it. A model that reaches this derived limit is looping or cutting off its output, so the request fails instead of returning a partial or unchanged text:
+When `max_tokens` is omitted or null, the service does not set an output-token cap. Generation uses the model's end-of-response token and the backend's context window. An explicit `max_tokens` is forwarded unchanged. If a backend reports an incomplete response without an explicit client cap, the service keeps the original and reports the failure:
 
 ```json
-{"detail":"text processing stopped at the generation limit (310 tokens); the text was not processed","reason":"generation_limit","max_tokens":310,"original":"..."}
+{"detail":"the text model returned an incomplete response; the original text was kept","reason":"incomplete_generation","original":"..."}
 ```
 
 The status is `502`, `result` is absent, and `original` returns the submitted text. A client must not treat `original` as a correction or translation. An explicit `max_tokens` keeps the previous behavior: the response is `200` with whatever the model generated.
+
+The default `backends.llama.template_style: loqira_gec` uses the [GEC model's trained system prompt](https://huggingface.co/loqira/Qwen3.5-0.8B-GEC-KAZ-RUS-ENG), thinking off and independent correction requests. It applies the terminology/spelling pre-pass, then sends the current text without extra system instructions or previous turns. For a general instruction model, set `template_style: ""` to use the generic profile/context prompt. PLaMo translation keeps its separate native template. Continuous microphone capture does not require a new model conversation for each phrase.
+
+In the panel, a failed batch stays queued. The next finalized phrase retries it together with the new text, in order, without restarting capture. The configured silence rollover archives the transcript and resets processing while capture stays active.
 
 ## Session warm-up
 
@@ -121,9 +133,11 @@ Events include `ready`, `config_applied`, `speech_started`, `partial`, `final`, 
 These routes manage local processes and settings. They are not public deployment endpoints.
 
 - `GET /admin/status`: gateway and backend process state, including the `omnivoice` cloning engine.
-- `POST /admin/backends/{name}/load`, `/unload`, `/restart`: manage `audiocpp`, `audiocpp_clone` (alias `clone`), `whisper` or `llama` when configured.
+- `POST /admin/backends/{name}/load`, `/unload`, `/restart`: manage `audiocpp`, `audiocpp_clone`, `audiocpp_diar`, native HTTP `omnivoice`, `whisper` or `llama` when configured. `clone` follows the selected cloning process; the legacy OmniVoice CLI starts through speech requests.
 - `GET /admin/compute`: current and available device choices for `main`, `clone`, `diar` and `llm`.
-- `POST /admin/compute`: apply a body such as `{"devices":{"main":"cpu","llm":"cpu"}}`. Allowed device values are `cpu` and `gpu`, subject to installed runtime support. Busy processes cause `409` and retain their previous settings. `clone` switches the omnivoice.cpp engine between `runtime/bin/omnivoice-cpu` and `runtime/bin/omnivoice-cuda`.
+- `POST /admin/compute`: apply a body such as `{"devices":{"main":"cpu","llm":"cpu"}}`. Allowed values are `cpu` and `gpu`, subject to installed runtime support. Busy or externally managed processes cause `409`. `clone` follows the selected model's process; `llm` switches correction and translation together.
+- `GET /admin/engines`: active and pending TTS/ASR choices, installed alternatives and `restart_required`.
+- `POST /admin/engines`: save next-start choices, for example `{"tts":"omnivoice","asr":"audiocpp"}`. TTS accepts `omnivoice` or `audiocpp`; ASR accepts `audiocpp` or `whisper`. Missing binaries or weights return 400. This does not download files or restart the service.
 - `POST /admin/shutdown`: stop owned inference processes and exit the gateway.
 
 ## Speaker diarization

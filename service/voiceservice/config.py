@@ -176,24 +176,24 @@ DEFAULTS: dict[str, Any] = {
                 },
             ],
         },
-        # The default cloning engine: k2-fsa omnivoice.cpp driving OmniVoice
+        # ServeurpersoCom/omnivoice.cpp driving the k2-fsa OmniVoice model.
         # 0.6B Q8_0 (~945 MB total, 600+ languages, zero-shot cloning; weights
-        # CC-BY-NC 4.0 - download them yourself, see README). A stdin/stdout
-        # CLI rather than an HTTP server, so the service supervises it through
-        # backends/omnivoice.py. The `clone` compute group swaps `binary`/
+        # CC-BY-NC 4.0 - download them yourself, see README). The HTTP server
+        # keeps one model resident when voices or languages change.
+        # The `clone` compute group swaps `binary`/
         # `codec_binary` between the omnivoice-cpu and omnivoice-cuda builds.
         "omnivoice": {
             "enabled": True,
-            "binary": "runtime/bin/omnivoice-cpu/omnivoice-tts.exe",
+            "binary": "runtime/bin/omnivoice-cpu/tts-server.exe",
+            "port": 8107,
             "codec_binary": "runtime/bin/omnivoice-cpu/omnivoice-codec.exe",
             "backend": "cpu",
-            "threads": 8,
-            "steps": 32,               # MaskGIT decode steps; fewer is faster, lower quality
+            "steps": 32,               # Legacy CLI only; upstream HTTP uses 32 steps.
             "voice_dir": "runtime/voice-library",
-            "idle_stop_s": 300,        # stop the child (frees ~1 GB RAM) when idle
+            "idle_stop_s": 60,         # release the speech model after a minute without requests
             "start_timeout_s": 120,
             "request_timeout_s": 600,  # per request; CPU RTF is ~10-24 under load
-            "max_line_chars": 300,     # texts are split into sentence lines first
+            "max_line_chars": 300,     # Legacy CLI only; HTTP handles long-form chunking.
             "models": [
                 {
                     "id": "omnivoice-q8",
@@ -222,6 +222,7 @@ DEFAULTS: dict[str, Any] = {
             # Small GEC corrector (563 MB). The service always sends
             # enable_thinking=false, which this model needs (thinking mode
             # produces empty/wrong output — measured).
+            "template_style": "loqira_gec",
             "binary": "runtime/bin/llama-vulkan/llama-server.exe",
             "variant_dirs": [          # first existing variant wins; enables cuda->vulkan->cpu fallback
                 "runtime/bin/llama-cuda",
@@ -235,13 +236,12 @@ DEFAULTS: dict[str, Any] = {
             "gpu_layers": 0,
             "flash_attn": True,
             "threads": 8,
-            # llama-server keeps old prompt states in a host-RAM cache that
-            # defaults to 8192 MiB. One dictation slot needs a few at most.
-            "cache_ram_mib": 512,
+            # Keep the active slot's KV cache; do not retain old slot snapshots.
+            "cache_ram_mib": 0,
             "cache_type_k": None,      # None = llama.cpp default (f16); q8_0 halves KV memory
             "cache_type_v": None,
             "start_timeout_s": 180,
-            "idle_stop_s": 300,        # free RAM soon after a session ends
+            "idle_stop_s": 90,
             "extra_args": [],
         },
         # Dedicated small translator: translation modes route here, correction
@@ -265,9 +265,9 @@ DEFAULTS: dict[str, Any] = {
             "gpu_layers": 0,
             "flash_attn": True,
             "threads": 8,
-            "cache_ram_mib": 512,
+            "cache_ram_mib": 0,
             "start_timeout_s": 180,
-            "idle_stop_s": 300,
+            "idle_stop_s": 90,
             "extra_args": [],
         },
     },
@@ -327,6 +327,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         cfg = _deep_merge(DEFAULTS, _expand_env(user))
     resolved = _resolve_paths(cfg, root)
     resolved["_root"] = str(root)
+    from .engines import load_saved
+    load_saved(resolved)
     return resolved
 
 

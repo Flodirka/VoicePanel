@@ -4,9 +4,11 @@
 #include <QStringList>
 
 class QComboBox;
+class QJsonObject;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
+class QGroupBox;
 class PanelTests;
 
 namespace VoicePanel {
@@ -33,6 +35,8 @@ private:
     void load();
     void save();
     void showSnapshot(const QByteArray &body);
+    void showEngines(const QJsonObject &snapshot);
+    void selectAllGpu();
     void restoreChoices();
     void updateSaveState();
     QString errorDetail(const QByteArray &body, const QString &fallback) const;
@@ -44,5 +48,11 @@ private:
     QMap<QString, Row> rows_;
     QMap<QString, QString> serverDevices_;
     bool loading_ = false;
+    QGroupBox *enginesBox_ = nullptr;
+    QComboBox *asrEngine_ = nullptr;
+    QComboBox *ttsEngine_ = nullptr;
+    QMap<QString, QString> engineChoices_;
+    void loadEngines();
+    void saveEngines();
 };
 } // namespace VoicePanel

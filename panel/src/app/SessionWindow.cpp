@@ -8,6 +8,7 @@
 #include "core/SessionController.h"
 #include "core/Settings.h"
 #include "core/TtsPlayer.h"
+#include "core/VoiceProfiles.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -58,11 +59,14 @@ SessionWindow::SessionWindow(PanelApp *app, QWidget *parent)
     refreshVoices();
     updateExplanation();
     updateCableHint();
+    updateVoiceHint();
 
     connect(controller_, &SessionController::caption, this,
-            [this](const QString &heard, const QString &translated) {
-        if (mode_ == Mode::Interpreter) appendRemote(heard, translated);
-        else appendRemote(heard, translated);   // subtitles: one pane, both lines
+            [this](const QString &speaker, const QString &heard, const QString &translated) {
+        // Interpreter captions have no speaker; subtitles carry the label of the
+        // voice the rolling diarisation window recognised in this phrase.
+        const QString tag = speaker.isEmpty() ? QString() : speaker + QStringLiteral(": ");
+        appendRemote(tag + heard, translated);   // subtitles: one pane, both lines
     });
     connect(controller_, &SessionController::outgoing, this,
             [this](const QString &said, const QString &voiced) {
@@ -276,10 +280,21 @@ void SessionWindow::buildSettings() {
     voiceRow->addWidget(previewButton_);
     form->addRow(QString(), voiceRow);
 
+    // The user has to be able to see, before starting and without opening
+    // anything else, whose voice the other side will hear.
+    voiceHint_ = new QLabel;
+    voiceHint_->setWordWrap(true);
+    voiceHint_->setProperty("role", "caption");
+    settings_->column()->addWidget(voiceHint_);
+
     cableHint_ = new QLabel;
     cableHint_->setWordWrap(true);
     cableHint_->setProperty("role", "muted");
     settings_->column()->addWidget(cableHint_);
+
+    for (QComboBox *combo : {voiceBox_, outgoingBox_, speakBox_}) {
+        connect(combo, &QComboBox::currentIndexChanged, this, [this] { updateVoiceHint(); });
+    }
 
     connect(settingsButton_, &QPushButton::clicked, this, [this] { settings_->openAt(); });
     connect(callLanguageBox_, &QComboBox::currentIndexChanged, this, [this] {
@@ -323,6 +338,7 @@ void SessionWindow::updateExplanation() {
         settings_->form()->setRowVisible(previewButton_, interpreter);
         settings_->form()->setRowVisible(callLanguageBox_, interpreter);
     }
+    voiceHint_->setVisible(interpreter);
     if (!interpreter) {
         clearPanes();
     }
@@ -398,7 +414,42 @@ void SessionWindow::refreshVoices() {
         int index = voiceBox_->findData(keep.isEmpty() ? current : keep);
         if (index < 0) index = 0;
         if (voiceBox_->count() > 0) voiceBox_->setCurrentIndex(index);
+        updateVoiceHint();
     });
+    updateVoiceHint();
+}
+
+bool SessionWindow::speaksToCall() const {
+    return outgoingBox_->currentData().toInt() != 2;   // 2 = captions only
+}
+
+void SessionWindow::updateVoiceHint() {
+    const QString name = sessionVoiceName();
+    if (!speaksToCall()) {
+        voiceHint_->setText(tr("Captions only: nothing is spoken into the call."));
+    } else if (name.isEmpty()) {
+        voiceHint_->setText(tr("No voice profile selected, so the call hears the engine's own voice. "
+                               "Record yours in Settings → Voice profiles."));
+    } else {
+        voiceHint_->setText(tr("The call hears “%1” through “Play into”, which must be your virtual cable.")
+                                .arg(name));
+    }
+}
+
+QString SessionWindow::sessionVoiceName() const {
+    const QString id = voiceBox_->currentData().toString();
+    for (const auto &profile : app_->voices()->profiles()) {
+        if (profile.id == id) return profile.name;
+    }
+    return id;
+}
+
+QString SessionWindow::speakingSummary() const {
+    if (!speaksToCall()) return tr("Captions only");
+    const QString name = sessionVoiceName().isEmpty() ? tr("the engine's own voice") : sessionVoiceName();
+    const QString device = speakBox_->currentIndex() >= 0 ? speakBox_->currentText() : QString();
+    return device.isEmpty() ? tr("The call hears “%1”").arg(name)
+                            : tr("The call hears “%1” via %2").arg(name, device);
 }
 
 void SessionWindow::updateCableHint() {
@@ -440,7 +491,10 @@ void SessionWindow::applySettings() {
     s->callLanguage = callLang;
     const QString profile = voiceBox_->currentData().toString();
     if (!profile.isEmpty()) {
+        // The call hears this voice in both directions; saving it for English
+        // alone left the Russian answer on the built-in Piper voice.
         s->ttsVoiceProfile = profile;
+        s->ttsRussianVoice = profile;
         s->ttsEnglishVoice = profile;
     }
     s->save();
@@ -464,6 +518,9 @@ void SessionWindow::startListening() {
         return;
     }
     setRunning(true);
+    // The controller's own "Interpreting" says nothing about the voice; the
+    // state line is the one place the user watches while the call is live.
+    if (mode_ == Mode::Interpreter) statusLabel_->setText(speakingSummary());
 }
 
 void SessionWindow::appendRemote(const QString &heard, const QString &translated) {

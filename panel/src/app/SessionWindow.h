@@ -50,6 +50,11 @@ private:
     void setRunning(bool running);
     void updateExplanation();
     void updateCableHint();
+    // What the other side will hear, in words: which voice and which device.
+    void updateVoiceHint();
+    bool speaksToCall() const;
+    QString sessionVoiceName() const;
+    QString speakingSummary() const;
     void appendRemote(const QString &heard, const QString &translated);
     void appendMine(const QString &said, const QString &voiced);
     void clearPanes();
@@ -76,6 +81,7 @@ private:
     LevelBadge *micBadge_ = nullptr;
     LevelBadge *remoteBadge_ = nullptr;
     QLabel *cableHint_ = nullptr;
+    QLabel *voiceHint_ = nullptr;
     QLabel *statusLabel_ = nullptr;
     QFrame *sideDivider_ = nullptr;
     QWidget *interpreterBody_ = nullptr;

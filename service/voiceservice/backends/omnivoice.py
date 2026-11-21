@@ -1,28 +1,18 @@
-"""omnivoice.cpp backend: zero-shot voice cloning TTS via a piped CLI.
+"""ServeurpersoCom/omnivoice.cpp: native HTTP server and legacy piped CLI.
 
-The engine (k2-fsa omnivoice.cpp, built into runtime/bin/omnivoice-<cpu|cuda>/)
-is a stdin/stdout tool, not an HTTP server, so unlike the audio.cpp backends it
-is supervised here directly:
+The preferred tts-server process retains its model across voice, language and
+design changes. Reference RVQ codes are cached beside each profile WAV and
+registered once per server lifetime. An idle timeout releases the model.
 
-* one warm child process with ``--stream-by-line -o -``; every input line
-  synthesises to one utterance, written to stdout as a 44-byte RIFF header
-  (live marker, no sizes) followed by PCM and flushed immediately;
-* a request writes one line and reads utterances until the stream stalls, so
-  no sentinel protocol is needed;
-* the child is bound to (model, voice, language): changing any of them
-  restarts it with the matching arguments. References are pre-encoded once
-  per profile with ``omnivoice-codec`` (a tiny .rvq) and cached beside the
-  profile WAV, so a voice switch costs a restart, not a re-encode;
-* the child is stopped after ``idle_stop_s`` idle seconds (frees ~1 GB RAM;
-  the CUDA build also frees VRAM) and restarted on the next request.
-
-Long texts are split into sentence lines before sending (the engine's own
-chunking is bypassed) and the PCM of the resulting utterances is concatenated
-into a single 24 kHz mono WAV, which is the format the codec always emits.
+The legacy omnivoice-tts executable remains supported. Its process arguments
+bind the model, voice, language and design; changing them restarts the child.
+The CLI streams RIFF headers followed by PCM without a completion sentinel.
+The supervisor reads until the pipe stalls and joins the utterances as WAV.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import queue
 import re
@@ -33,6 +23,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+from ..tts import speech_parameters, validate_speech_parameters
+from .process import ManagedProcess
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 SAMPLE_RATE = 24000
@@ -69,7 +62,7 @@ class OmnivoiceBackend:
         self._proc: subprocess.Popen | None = None
         self._out: "queue.Queue[bytes]" = queue.Queue()
         self._reader: threading.Thread | None = None
-        self._key: tuple[str, str, str] | None = None   # (model_id, voice_id, lang)
+        self._key: tuple | None = None
         self._lock = asyncio.Lock()                     # one synthesis at a time
         self._leases = 0
         self._last_used = time.monotonic()
@@ -116,14 +109,16 @@ class OmnivoiceBackend:
     ) -> bytes:
         """Synthesize one text to a 24 kHz mono WAV. Clones when `voice` is a profile id.
 
-        ``options`` is accepted for interface parity with the other TTS
-        backends; the CLI has no per-request knobs beyond the process args
-        (``max_tokens`` and friends do not apply to this engine).
+        Design, steps and seed are process arguments. A change restarts the child.
         """
-        if speed is not None:
-            raise OmnivoiceError("the omnivoice engine has no speed control")
         if model not in self.models:
             raise OmnivoiceError(f"unknown omnivoice model '{model}'")
+        try:
+            _, options = validate_speech_parameters(
+                speech_parameters("omnivoice", self.models[model]), speed, None, options or {}, voice,
+            )
+        except ValueError as exc:
+            raise OmnivoiceError(str(exc)) from exc
         lang = "" if str(language or "").lower() in _AUTO_LANGS else str(language)
         lines = self._split_lines(text)
         timeout = timeout or self.request_timeout_s
@@ -131,7 +126,7 @@ class OmnivoiceBackend:
             self._leases += 1
             self._last_used = time.monotonic()
             try:
-                await asyncio.to_thread(self._ensure_process, model, voice or "", lang)
+                await asyncio.to_thread(self._ensure_process, model, voice or "", lang, options)
                 deadline = time.monotonic() + timeout
                 chunks: list[bytes] = []
                 for line in lines:
@@ -164,19 +159,28 @@ class OmnivoiceBackend:
         return lines
 
     # ------------------------------------------------------------------ process
-    def _command(self, entry: dict[str, Any], voice: str, lang: str) -> list[str]:
+    def _command(self, entry: dict[str, Any], voice: str, lang: str, options: dict | None = None) -> list[str]:
+        options = options or {}
         args = [
             str(self.cfg.get("binary", "")),
             "--model", str(entry["path"]),
             "--codec", str(entry["codec_path"]),
             "--stream-by-line", "-o", "-",
-            "--steps", str(self.steps),
+            "--steps", str(options.get("steps", self.steps)),
             # One utterance per line: the service chunks sentences itself.
             "--chunk-duration", "999",
             "--chunk-threshold", "999",
         ]
         if lang:
             args += ["--lang", lang]
+        if options.get("instruct"):
+            args += ["--instruct", options["instruct"]]
+        if "seed" in options:
+            args += ["--seed", str(options["seed"])]
+        if self.cfg.get("backend", "cpu") == "cpu":
+            args += ["--device", "CPU"]
+        elif self.cfg.get("backend") == "cuda":
+            args += ["--device", f"CUDA{self.cfg.get('device', 0)}"]
         if voice:
             args += self._reference_args(voice)
         return args
@@ -189,7 +193,7 @@ class OmnivoiceBackend:
                 f"voice profile '{voice}' has no reference WAV in {self.voice_dir}"
             )
         rvq = self.voice_dir / f"{voice}.rvq"
-        if not rvq.is_file():
+        if not rvq.is_file() or rvq.stat().st_mtime_ns < wav.stat().st_mtime_ns:
             self._encode_reference(voice, wav, rvq)
         text_path = self.voice_dir / f"{voice}.ref.txt"
         text_path.write_text(self._profile_transcript(voice), encoding="utf-8")
@@ -236,9 +240,10 @@ class OmnivoiceBackend:
             work.unlink(missing_ok=True)
             work.with_suffix(".rvq").unlink(missing_ok=True)
 
-    def _ensure_process(self, model: str, voice: str, lang: str) -> None:
+    def _ensure_process(self, model: str, voice: str, lang: str, options: dict | None = None) -> None:
         """Start or restart the child so it serves this (model, voice, lang)."""
-        key = (model, voice, lang)
+        options = options or {}
+        key = (model, voice, lang, options.get("instruct", ""), options.get("steps", self.steps), options.get("seed", -1))
         if self.running and self._key == key:
             return
         self._stop_child()
@@ -247,7 +252,7 @@ class OmnivoiceBackend:
             self.log_dir.mkdir(parents=True, exist_ok=True)
             self._log_file = open(self.log_dir / "omnivoice.log", "ab")
         self._proc = subprocess.Popen(
-            self._command(self.models[model], voice, lang),
+            self._command(self.models[model], voice, lang, options),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self._log_file or subprocess.DEVNULL,
@@ -328,6 +333,104 @@ class OmnivoiceBackend:
         async with self._lock:
             self._leases = 0
             await asyncio.to_thread(self._stop_child)
+
+
+class OmnivoiceHttpBackend(OmnivoiceBackend):
+    """The native HTTP server keeps one model resident across voice/language changes."""
+
+    def __init__(self, cfg: dict[str, Any], log_dir: Path | None = None) -> None:
+        cfg = dict(cfg)
+        codec = Path(cfg.get("codec_binary", ""))
+        cpu_codec = codec.parent.parent / "omnivoice-cpu" / codec.name
+        if cfg.get("backend") == "cuda" and cpu_codec.is_file():
+            cfg["codec_binary"] = str(cpu_codec)
+        super().__init__(cfg, log_dir)
+        self._model_id = next(iter(self.models))
+        self.proc = self._server(self._model_id)
+        self._registered: dict[str, tuple] = {}
+
+    def _server(self, model: str) -> ManagedProcess:
+        entry = self.models[model]
+        host, port = self.cfg.get("host", "127.0.0.1"), int(self.cfg.get("port", 8107))
+        device = "CPU" if self.cfg.get("backend", "cpu") == "cpu" else f"CUDA{self.cfg.get('device', 0)}"
+        return ManagedProcess(
+            name="omnivoice", command=[self.cfg["binary"], "--model", entry["path"], "--codec", entry["codec_path"],
+                "--host", host, "--port", str(port), "--device", device], host=host, port=port,
+            cwd=str(Path(self.cfg["binary"]).parent), log_dir=self.log_dir,
+            start_timeout_s=self.start_timeout_s, idle_stop_s=self.idle_stop_s,
+        )
+
+    @property
+    def running(self) -> bool:
+        return self.proc.running
+
+    def status(self) -> dict[str, Any]:
+        return {**self.proc.status(), "name": "omnivoice", "leases": self._leases}
+
+    async def speech(self, text: str, *, model: str, voice: str | None = None, speed: float | None = None,
+                     language: str | None = None, options: dict[str, Any] | None = None,
+                     timeout: float | None = None) -> bytes:
+        if model not in self.models:
+            raise OmnivoiceError(f"unknown omnivoice model '{model}'")
+        params = {**speech_parameters("omnivoice", self.models[model]), "options": ["seed"]}
+        try:
+            _, options = validate_speech_parameters(params, speed, None, options or {}, voice)
+        except ValueError as exc:
+            raise OmnivoiceError(str(exc)) from exc
+        if not text.strip():
+            raise OmnivoiceError("input text is empty")
+        async with self._lock:
+            self._leases += 1
+            try:
+                if model != self._model_id:
+                    await self.proc.stop()
+                    self._model_id = model
+                    self.proc = self._server(model)
+                    self._registered.clear()
+                reference = None
+                if voice:
+                    await asyncio.to_thread(self._reference_args, voice)
+                    rvq = self.voice_dir / f"{voice}.rvq"
+                    transcript = self._profile_transcript(voice)
+                    reference = (rvq, transcript)
+                async with self.proc.lease():
+                    client = self.proc.http()
+                    status = self.proc.status()
+                    if reference is not None:
+                        rvq, transcript = reference
+                        key = (status["pid"], status["restarts"], rvq.stat().st_mtime_ns, transcript)
+                        if status["adopted"] or self._registered.get(voice) != key:
+                            response = await client.post(self.proc.base_url + "/v1/audio/voices", json={
+                                "name": voice, "ref_text": transcript,
+                                "rvq_b64": base64.b64encode(rvq.read_bytes()).decode("ascii"),
+                            }, timeout=120)
+                            response.raise_for_status()
+                            self._registered[voice] = key
+                    payload = {"model": Path(self.models[model]["path"]).name, "input": text, "response_format": "wav"}
+                    if voice:
+                        payload["voice"] = voice
+                    if str(language or "").lower() not in _AUTO_LANGS:
+                        payload["language"] = language
+                    if options.get("instruct"):
+                        payload["instructions"] = options["instruct"]
+                    if "seed" in options:
+                        payload["seed"] = options["seed"]
+                    response = await client.post(self.proc.base_url + "/v1/audio/speech", json=payload,
+                                                 timeout=timeout or self.request_timeout_s)
+                    response.raise_for_status()
+                    return response.content
+            finally:
+                self._leases -= 1
+
+    async def stop(self) -> None:
+        async with self._lock:
+            await self.proc.stop()
+            self._registered.clear()
+
+
+def make_omnivoice_backend(cfg: dict[str, Any], log_dir: Path | None = None) -> OmnivoiceBackend:
+    backend = OmnivoiceHttpBackend if Path(cfg["binary"]).stem == "tts-server" else OmnivoiceBackend
+    return backend(cfg, log_dir)
 
 
 # ------------------------------------------------------------------ wav utils

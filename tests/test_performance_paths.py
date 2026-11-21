@@ -17,7 +17,6 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from voiceservice.api.text import default_max_tokens
 from voiceservice.app import create_app
 from voiceservice.backends.audiocpp import AudioCppBackend
 from voiceservice.backends.llama import LlamaBackend
@@ -132,7 +131,7 @@ def test_backend_requests_reuse_one_connection(tmp_path: Path) -> None:
 def test_llama_prompt_cache_is_bounded_by_default() -> None:
     cfg = load_config(None)["backends"]["llama"]
     args = LlamaBackend(cfg).proc.command
-    assert args[args.index("--cache-ram") + 1] == "512"
+    assert args[args.index("--cache-ram") + 1] == "0"
     assert "-ctk" not in args and "-ctv" not in args
 
 
@@ -185,7 +184,7 @@ def service(tmp_path: Path, monkeypatch) -> TestClient:
         yield client
 
 
-def test_text_processing_caps_generation_when_the_client_sets_no_limit(service, monkeypatch) -> None:
+def test_text_processing_only_caps_generation_when_the_client_sets_a_limit(service, monkeypatch) -> None:
     seen = {}
 
     async def complete(messages, **kw):
@@ -196,7 +195,7 @@ def test_text_processing_caps_generation_when_the_client_sets_no_limit(service, 
     text = "this are a test."
     resp = service.post("/v1/text/process", json={"text": text, "mode": "correct_en"})
     assert resp.status_code == 200 and resp.json()["result"] == "Fixed."
-    assert seen["max_tokens"] == default_max_tokens(text)
+    assert "max_tokens" not in seen
     resp = service.post("/v1/text/process", json={"text": text, "mode": "correct_en", "max_tokens": 7})
     assert seen["max_tokens"] == 7
 

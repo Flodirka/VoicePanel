@@ -8,7 +8,6 @@
 #include "core/Settings.h"
 #include "core/TtsPlayer.h"
 
-#include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -36,9 +35,15 @@ CaptionOverlay::CaptionOverlay(PanelApp *app, QWidget *parent)
 
     controller_ = new SessionController(app_->service(), app_->tts(), this);
     connect(controller_, &SessionController::caption, this,
-            [this](const QString &heard, const QString &translated) {
-        heard_->setText(heard);
-        translated_->setText(translated);
+            [this](const QString &speaker, const QString &heard, const QString &translated) {
+        // The label follows whichever line is on screen: the heard line normally,
+        // the translation when that is the only one shown. Transcript-only mode
+        // shows the heard line at the translation size instead.
+        const QString tag = speaker.isEmpty() ? QString() : speaker + QStringLiteral(": ");
+        const int mode = app_->settings()->subtitlesDisplay;
+        heard_->setText(mode == 1 ? QString() : tag + heard);
+        translated_->setText(mode == 2 ? QString()
+                                       : (mode == 1 ? tag : QString()) + translated);
     });
     connect(controller_, &SessionController::error, this,
             [this](const QString &message) { translated_->setText(message); });
@@ -160,9 +165,9 @@ void CaptionOverlay::buildSettings() {
     size_->addItem(tr("L"), int(2));
     form->addRow(tr("Text size"), size_);
 
-    voice_ = new QCheckBox(tr("Speak the translation"));
-    voice_->setToolTip(tr("Speak the translation with the selected voice"));
-    form->addRow(QString(), voice_);
+    // Caption voicing is deferred: the voice would be captured again by the
+    // same loopback the captions translate from, so it waits for a playback
+    // route that excludes our own output. Subtitles stay text-only.
 
     connect(settingsButton_, &QPushButton::clicked, this, [this] { settings_->openAt(); });
     connect(source_, &QComboBox::currentIndexChanged, this, [this] {
@@ -182,41 +187,35 @@ void CaptionOverlay::buildSettings() {
         app_->settings()->save();
         applyTextSize();
     });
-    connect(voice_, &QCheckBox::toggled, this, [this](bool on) {
-        if (loading_) return;
-        app_->settings()->speakCaptions = on;
-        app_->settings()->save();
-        controller_->setSpeakCaptions(on);
-    });
 }
 
 void CaptionOverlay::applyDisplayMode() {
     const int mode = app_->settings()->subtitlesDisplay;
-    // Transcript-only reads at the translation size: the caption is the main
-    // content in that mode, not a footnote.
     const bool showHeard = mode == 0 || mode == 2;
     const bool showTranslated = mode == 0 || mode == 1;
     heard_->setVisible(showHeard);
     translated_->setVisible(showTranslated);
     divider_->setVisible(mode == 0);
-    QFont big = translated_->font();
-    big.setPixelSize(textSizes().translated);
-    big.setWeight(QFont::DemiBold);
-    if (mode == 2) heard_->setFont(big);
-    else applyTextSize();
+    // Sizes depend on the mode, so they are always applied together with it.
+    applyTextSize();
 }
 
 void CaptionOverlay::applyTextSize() {
     const auto sizes = textSizes();
-    QFont small = heard_->font();
-    small.setPixelSize(sizes.heard);
-    heard_->setFont(small);
+    // Transcript-only reads at the translation size: the caption is the main
+    // content in that mode, not a footnote. Keeping that decision here (and not
+    // only in applyDisplayMode) means a text-size change cannot shrink it back.
+    const bool transcriptOnly = app_->settings()->subtitlesDisplay == 2;
+    QFont heard = heard_->font();
+    heard.setPixelSize(transcriptOnly ? sizes.translated : sizes.heard);
+    heard.setWeight(transcriptOnly ? QFont::DemiBold : QFont::Normal);
+    heard_->setFont(heard);
     QFont big = translated_->font();
     big.setPixelSize(sizes.translated);
     big.setWeight(QFont::DemiBold);
     translated_->setFont(big);
     // Two lines max for either line, so the strip never grows mid-video.
-    heard_->setMaximumHeight(sizes.heard * 3);
+    heard_->setMaximumHeight((transcriptOnly ? sizes.translated : sizes.heard) * 3);
     translated_->setMaximumHeight(sizes.translated * 3);
 }
 
@@ -258,7 +257,6 @@ void CaptionOverlay::refreshSources() {
     direction_->setCurrentIndex(direction_->findData(s->subtitlesLanguage));
     display_->setCurrentIndex(display_->findData(s->subtitlesDisplay));
     size_->setCurrentIndex(size_->findData(s->subtitlesTextSize));
-    voice_->setChecked(s->speakCaptions);
     loading_ = false;
 }
 
@@ -268,7 +266,6 @@ void CaptionOverlay::applySettings() {
     s->systemAudioDevice = source.startsWith(QLatin1String("pid:")) ? source
                                                                    : source.mid(4);
     s->subtitlesLanguage = direction_->currentData().toInt();
-    s->speakCaptions = voice_->isChecked();
     s->save();
 }
 
@@ -287,7 +284,6 @@ void CaptionOverlay::begin() {
 
     controller_->configure(*app_->settings(), SessionController::Mode::Subtitles);
     controller_->setDirection(direction_->currentData().toInt());
-    controller_->setSpeakCaptions(voice_->isChecked());
     QString vadPath = app_->vadPath();
     if (vadPath.isEmpty()) vadPath = app_->settings()->vadModel;
     if (vadPath.isEmpty()) vadPath = QStringLiteral("models/silero_vad.onnx");

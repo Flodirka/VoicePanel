@@ -129,6 +129,8 @@ async def preview_voice(
     started = time.perf_counter()
     try:
         audio = await _synth_with_voice(registry, profile, text, language)
+    except KeyError as exc:
+        raise HTTPException(503, str(exc))
     except httpx.HTTPStatusError as exc:
         raise HTTPException(502, f"cloning TTS error: {exc.response.text[:300]}")
     except httpx.HTTPError as exc:

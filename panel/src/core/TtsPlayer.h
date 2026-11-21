@@ -1,6 +1,7 @@
 #pragma once
 #include "core/ServiceClient.h"
 #include <QByteArray>
+#include <QJsonObject>
 #include <QList>
 #include <QMap>
 #include <QObject>
@@ -26,7 +27,15 @@ public:
     explicit TtsPlayer(ServiceClient *service, QObject *parent = nullptr);
     ~TtsPlayer() override;
 
-    void setModel(const QString &model) { model_ = model; }
+    void setModel(const QString &model) {
+        instructions_.clear();
+        speechOptions_ = {};
+        model_ = model;
+        speechParameters_ = {};
+    }
+    void setInstructions(const QString &instructions) { instructions_ = instructions; }
+    void setSpeechParameters(const QJsonObject &parameters) { speechParameters_ = parameters; }
+    void setSpeechOptions(const QJsonObject &options) { speechOptions_ = options; }
     void setVoiceProfile(const QString &profileId) { voiceProfile_ = profileId; }
     void setLanguageVoices(const QString &russian, const QString &english) {
         russianVoice_ = russian; englishVoice_ = english; languageVoices_ = true;
@@ -87,6 +96,9 @@ private:
     QString voiceProfile_;
     QString russianVoice_;
     QString englishVoice_;
+    QString instructions_;
+    QJsonObject speechParameters_;
+    QJsonObject speechOptions_;
     bool languageVoices_ = false;
     double speed_ = 1.0;
     int pauseMs_ = 0;

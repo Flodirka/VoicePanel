@@ -193,6 +193,8 @@ void ServiceClient::processText(const QString &text, const QString &mode,
                 auto detail = obj.value("detail").toString();
                 if (obj.value("reason").toString() == "generation_limit")
                     detail = tr("The text model stopped at its output limit, so this text was not processed.");
+                else if (obj.value("reason").toString() == "incomplete_generation")
+                    detail = tr("The text model returned an incomplete response. The original text is kept.");
                 if (!detail.isEmpty()) err = detail;
             }
             cb(false, {}, {}, err);
@@ -217,12 +219,15 @@ void ServiceClient::warmup(const QString &mode, const QString &profile) {
 
 void ServiceClient::speech(const QString &text, const QString &model, const QString &voice,
                            double speed,
-                           std::function<void(bool, QByteArray, QString)> cb, const QString &language) {
+                           std::function<void(bool, QByteArray, QString)> cb, const QString &language,
+                           const QString &instructions, const QJsonObject &options) {
     QJsonObject payload{{"input", text}, {"response_format", "wav"}};
     if (!model.isEmpty()) payload.insert("model", model);
     if (!voice.isEmpty()) payload.insert("voice", voice);
     if (!language.isEmpty()) payload.insert("language", language);
-    payload.insert("speed", speed);
+    if (speed != 1.0) payload.insert("speed", speed);
+    if (!instructions.isEmpty()) payload.insert("instructions", instructions);
+    if (!options.isEmpty()) payload.insert("options", options);
     QNetworkRequest req{QUrl(base_ + "/v1/audio/speech")};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     auto *reply = nam_.post(req, QJsonDocument(payload).toJson());

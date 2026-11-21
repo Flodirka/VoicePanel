@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .. import __version__, compute
+from .. import __version__, compute, engines
 from ..backends import ComputeBusy, Registry
 from .deps import get_registry
 
@@ -95,6 +95,12 @@ async def capabilities(registry: Registry = Depends(get_registry)) -> dict[str, 
             for m in registry.audiocpp_clone.cfg.get("models", [])
             if m.get("task") == "tts"
         ]
+    if registry.omnivoice is not None:
+        tts_entries += [{"id": mid, "engine": "omnivoice", "task": "tts",
+                         "loaded": registry.omnivoice.running, "model": os.path.basename(entry["path"]),
+                         "on_demand": True} for mid, entry in registry.omnivoice.models.items()]
+    for entry in tts_entries:
+        entry["speech_parameters"] = registry.tts_parameters(entry["id"])
     llm_entry = None
     if registry.llm is not None:
         llm_entry = {
@@ -170,6 +176,20 @@ class ComputeRequest(BaseModel):
     devices: dict[str, str] = Field(min_length=1)
 
 
+@router.get("/admin/engines")
+async def get_engines(registry: Registry = Depends(get_registry)) -> dict[str, Any]:
+    return engines.snapshot(registry.cfg)
+
+
+@router.post("/admin/engines")
+async def set_engines(choices: dict[str, str], registry: Registry = Depends(get_registry)) -> dict[str, Any]:
+    try:
+        engines.save(registry.cfg, choices)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return engines.snapshot(registry.cfg)
+
+
 @router.get("/admin/compute")
 async def get_compute(registry: Registry = Depends(get_registry)) -> dict[str, Any]:
     """Device choices for the three inference processes, plus their state."""
@@ -197,12 +217,16 @@ def _compute_state(registry: Registry) -> dict[str, Any]:
     available = compute.available_devices(registry.cfg)
     groups = []
     for group, meta in compute.GROUPS.items():
+        if group == "clone" and not registry.cfg.get("tts", {}).get("clone_model"):
+            continue
         proc = registry.backend_process(group)
         status = proc.status() if proc is not None else None
+        if group == "clone" and compute.clone_section(registry.cfg) == "omnivoice" and registry.omnivoice is not None:
+            status = registry.omnivoice.status()
         groups.append({
             "id": group,
             "label": meta["label"],
-            "process": meta["process"],
+            "process": compute.clone_section(registry.cfg) if group == "clone" else meta["process"],
             "device": current[group],
             "available": available[group],
             "running": bool(status and status["running"]),
@@ -211,6 +235,9 @@ def _compute_state(registry: Registry) -> dict[str, Any]:
         })
     return {
         "groups": groups,
+        # The launch-time engine choice travels with the device choices so the
+        # settings window opens on both without a second round trip.
+        "engines": engines.snapshot(registry.cfg),
         "storage": str(compute.state_path(registry.cfg["_root"])),
     }
 
@@ -233,7 +260,8 @@ def _backend_proc(registry: Registry, name: str):
         "audiocpp": registry.audiocpp.proc,
         "audiocpp_clone": registry.audiocpp_clone.proc if registry.audiocpp_clone else None,
         "audiocpp_diar": registry.audiocpp_diar.proc if registry.audiocpp_diar else None,
-        "clone": registry.audiocpp_clone.proc if registry.audiocpp_clone else None,
+        "clone": registry.backend_process("clone"),
+        "omnivoice": registry.backend_process("clone") if compute.clone_section(registry.cfg) == "omnivoice" else None,
         "whisper": registry.whisper.proc if registry.whisper else None,
         "llama": registry.llama.proc if registry.llm else None,
     }

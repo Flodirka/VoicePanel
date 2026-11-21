@@ -115,6 +115,7 @@ def test_clean_correction_skips_the_model_by_default(service, monkeypatch) -> No
 
 
 def test_spelling_hints_still_reach_the_model(service, monkeypatch) -> None:
+    service.app.state.registry.llm.cfg["template_style"] = ""
     seen: dict = {}
 
     async def complete(messages, **kw):

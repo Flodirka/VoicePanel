@@ -4,7 +4,6 @@
 #include <QJsonObject>
 #include <QList>
 #include <QMap>
-#include <QList>
 #include <QObject>
 #include <QVector>
 
@@ -29,7 +28,8 @@ class SessionController : public QObject {
     Q_OBJECT
 public:
     // Subtitles: no microphone, no outgoing translation. One application's
-    // audio becomes translated captions (and optionally speech).
+    // audio becomes translated captions, with the same speaker labels a
+    // meeting gets: one stream often carries several voices.
     enum class Mode { Interpreter, Meeting, Subtitles };
     // Interpreter outgoing path: translate then speak, speak what was heard
     // unchanged, or leave the call alone and show captions only.
@@ -42,7 +42,6 @@ public:
     // Interpreters sometimes only want the caption; the outgoing voice can be
     // switched off without stopping the session.
     void setOutgoing(Outgoing mode) { outgoing_ = mode; }
-    void setSpeakCaptions(bool on) { speakCaptions_ = on; }
     // -1 = follow the setting; 0 = English into Russian, 1 = Russian into English.
     void setDirection(int direction) { direction_ = direction; }
     bool start(const QString &vadModelPath);
@@ -53,8 +52,9 @@ public:
 
 signals:
     // Interpreter captions carry both sides so the window can show the two
-    // columns the editor uses: what was heard and what it became.
-    void caption(const QString &heard, const QString &translated);
+    // columns the editor uses: what was heard and what it became. The speaker
+    // is empty when nobody has been identified yet (interpreter, first phrase).
+    void caption(const QString &speaker, const QString &heard, const QString &translated);
     // The outgoing pair: what the user said and the text that will be voiced
     // into the call. Without it the interpreter only shows the other side.
     void outgoing(const QString &said, const QString &voiced);
@@ -87,7 +87,13 @@ private:
     void onUtterance(bool incoming, const QVector<float> &samples, double at);
     void pump();
     void transcribeCurrent();
+    // Recognition and speaker separation run in separate engine processes, so
+    // they are started together and the phrase is finished when both are in.
+    void maybeFinishCurrent();
     void finishCurrent(const QString &text);
+    // Subtitles translate in their own queue: the recogniser must be free for
+    // the next phrase while a sentence waits for the translator.
+    void pumpTranslation();
     void appendTranscript(const QString &speaker, const QString &text, double at);
     // Speaker identity across utterances. Offline diarisation numbers speakers
     // per call, so a second phrase from the same person came back as a new
@@ -98,8 +104,17 @@ private:
         double end = 0.0;
         int speaker = 0;
     };
+    // A person's known speech is kept merged: every window still hears the
+    // previous two minutes, so storing its turns again would count the same
+    // seconds once per phrase and make an overlap sum measure how often a
+    // person was recorded rather than how much of a voice they explain.
+    void recordKnownTurn(int speaker, double start, double end);
     int canonicalSpeaker(double start, double end);
     static QString speakerLabel(int canonical);
+    // The voice a live session speaks for one language: an empty row means the
+    // voice the user saved, so a recorded clone is what the call hears; only a
+    // named profile overrides it.
+    static QString sessionVoice(const Settings &settings, const QString &chosen);
     void startDiarize(std::function<void()> then);
     bool looksLikeBleed(const QString &text) const;
     static QString comparable(const QString &text);
@@ -122,7 +137,6 @@ private:
     bool busy_ = false;
     bool running_ = false;
     Outgoing outgoing_ = Outgoing::Translated;
-    bool speakCaptions_ = false;
     int direction_ = -1;
     QString transcript_;
     // The microphone hears whatever the speakers play. Without echo
@@ -141,9 +155,31 @@ private:
     bool timelineStarted_ = false;
     QList<KnownTurn> knownTurns_;
     int nextSpeaker_ = 1;
+    // A window id belongs to a person only when that person's merged spans
+    // cover this share of the id's own speech in the window. A lower bar lets
+    // unrelated voices match on a single boundary turn.
+    static constexpr double kDiarizeIdShare = 0.5;
+    // An id too small to be a participant is a fragment at a turn boundary:
+    // enough to name the phrase, not enough to mint a new speaker.
+    static constexpr double kDiarizeNewSpeakerSeconds = 4.0;
+    static constexpr double kDiarizeNewSpeakerPhraseSeconds = 0.8;
+    static constexpr double kDiarizeNearShare = 0.15;
     QString pendingSpeaker_;
     QString lastRemoteLine_;
-    static constexpr int kDiarizeWindow = 320000;   // 20 s at 16 kHz, the context each window carries
+    // Speaker and words, kept together: the label is drawn on whichever caption
+    // line is visible, and the translation takes a few hundred milliseconds.
+    QList<QPair<QString, QString>> translationQueue_;
+    bool translating_ = false;
+    QString currentText_;
+    QString currentError_;
+    bool currentRecognized_ = false;
+    bool currentDiarized_ = true;
+    // Speaker identity survives only while the diariser can still hear the
+    // person: its ids are numbered per request. A 20 s window forgot everyone
+    // who paused for more than a few seconds and the transcript collected a new
+    // "Speaker N" every phrase. 120 s at 16 kHz keeps every voice that took
+    // part in the last two minutes, at a fixed 23 MB of audio.
+    static constexpr int kDiarizeWindow = 1920000;
     quint64 generation_ = 0;
 };
 
