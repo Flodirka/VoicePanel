@@ -2272,6 +2272,11 @@ private slots:
             controller.segment_.fill(0.1f, 4096);
             controller.inSpeech_ = true;
             controller.finishSegment(true);
+            // The server numbers requests by arrival, and both requests are in
+            // flight at once. Wait for each one before issuing the next, so the
+            // responses below address the segment this test means; the order
+            // under test is the order of the replies, not of the sockets.
+            QTRY_COMPARE(server.requests.size(), i + 1);
         }
         controller.stop();
         QTRY_COMPARE(server.requests.size(), 2);
