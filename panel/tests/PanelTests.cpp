@@ -45,6 +45,7 @@
 #include <QDataStream>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSizeGrip>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QSignalSpy>
@@ -1899,6 +1900,7 @@ private slots:
         control.configure(settings, SessionController::Mode::Subtitles);
         control.running_ = true;
         QSignalSpy captions(&control, &SessionController::caption);
+        QSignalSpy labels(&control, &SessionController::captionSpeaker);
 
         const QVector<float> samples(16000, 0.05f);          // one second
         for (int i = 0; i < 2; ++i) {
@@ -1917,10 +1919,56 @@ private slots:
             server.reply(asr, R"({"text":"hello there"})");
             QTRY_COMPARE(captions.size(), i + 1);
         }
-        QCOMPARE(captions.at(0).at(0).toString(), QString("Speaker 1"));
-        QCOMPARE(captions.at(1).at(0).toString(), QString("Speaker 1"));
+        // The caption may arrive before the diariser answers; its label is then
+        // delivered as a correction for the same phrase id.
+        const auto labelOf = [&](int row) {
+            const quint64 id = captions.at(row).at(3).toULongLong();
+            for (const auto &args : labels) {
+                if (args.at(0).toULongLong() == id) return args.at(1).toString();
+            }
+            return captions.at(row).at(0).toString();
+        };
+        QTRY_COMPARE(labelOf(0), QString("Speaker 1"));
+        QTRY_COMPARE(labelOf(1), QString("Speaker 1"));
         QCOMPARE(captions.at(1).at(1).toString(), QString("hello there"));
         QVERIFY(captions.at(1).at(2).toString().isEmpty());
+        control.stop();
+    }
+
+    void subtitleCaptionDoesNotWaitForTheSpeakerLabel() {
+        // The rolling diarisation window covers two minutes and answers seconds
+        // after recognition. Gating the caption on it was the extra delay the
+        // overlay showed against the interpreter; the label now follows.
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        SessionController control(&client, nullptr);
+        Settings settings;
+        settings.meetingDiarize = true;
+        settings.subtitlesDisplay = 2;         // transcript only: ASR is the only text step
+        control.configure(settings, SessionController::Mode::Subtitles);
+        control.running_ = true;
+        QSignalSpy captions(&control, &SessionController::caption);
+        QSignalSpy labels(&control, &SessionController::captionSpeaker);
+
+        control.onUtterance(true, QVector<float>(16000, 0.05f), 5.0);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 2, 1000);   // diariser and recogniser
+        const int diar = requestIndex(server, "diarize", 0);
+        const int asr = requestIndex(server, "transcriptions", 0);
+        QVERIFY(diar >= 0 && asr >= 0);
+        // Recognition answers first: the words must not wait for the diariser.
+        server.reply(asr, R"({"text":"spoken line"})");
+        QTRY_COMPARE_WITH_TIMEOUT(captions.size(), 1, 1000);
+        QCOMPARE(captions.first().at(1).toString(), QString("spoken line"));
+        QVERIFY(captions.first().at(0).toString().isEmpty());   // label not resolved yet
+        const quint64 id = captions.first().at(3).toULongLong();
+        QVERIFY(id != 0);
+        QCOMPARE(labels.size(), 0);
+
+        server.reply(diar, R"({"speaker_turns":[{"start_sample":0,"end_sample":16000,"speaker_id":"speaker_0","confidence":0.99}]})");
+        QTRY_COMPARE_WITH_TIMEOUT(labels.size(), 1, 1000);
+        QCOMPARE(labels.first().at(0).toULongLong(), id);
+        QCOMPARE(labels.first().at(1).toString(), QString("Speaker 1"));
         control.stop();
     }
 
@@ -1940,6 +1988,7 @@ private slots:
         control.configure(settings, SessionController::Mode::Subtitles);
         control.running_ = true;
         QSignalSpy captions(&control, &SessionController::caption);
+        QSignalSpy labels(&control, &SessionController::captionSpeaker);
 
         const QStringList ids{"speaker_0", "speaker_1", "speaker_2"};
         const QList<int> voices{0, 1, 0, 2, 1, 2};
@@ -1964,12 +2013,80 @@ private slots:
             QTRY_COMPARE(captions.size(), i + 1);
         }
 
-        QCOMPARE(captions.at(0).at(0).toString(), QString("Speaker 1"));
-        QCOMPARE(captions.at(1).at(0).toString(), QString("Speaker 2"));
-        QCOMPARE(captions.at(2).at(0).toString(), QString("Speaker 1"));
-        QCOMPARE(captions.at(3).at(0).toString(), QString("Speaker 3"));
-        QCOMPARE(captions.at(4).at(0).toString(), QString("Speaker 2"));
-        QCOMPARE(captions.at(5).at(0).toString(), QString("Speaker 3"));
+        // A label may be corrected after its caption, so the final label for a
+        // phrase is the direct one unless the diariser replaced it by id.
+        const auto labelOf = [&](int row) {
+            const quint64 id = captions.at(row).at(3).toULongLong();
+            for (const auto &args : labels) {
+                if (args.at(0).toULongLong() == id) return args.at(1).toString();
+            }
+            return captions.at(row).at(0).toString();
+        };
+        QTRY_COMPARE(labelOf(0), QString("Speaker 1"));
+        QTRY_COMPARE(labelOf(1), QString("Speaker 2"));
+        QTRY_COMPARE(labelOf(2), QString("Speaker 1"));
+        QTRY_COMPARE(labelOf(3), QString("Speaker 3"));
+        QTRY_COMPARE(labelOf(4), QString("Speaker 2"));
+        QTRY_COMPARE(labelOf(5), QString("Speaker 3"));
+        control.stop();
+    }
+
+    void subtitlesKeepOneVoiceOnOneLabel() {
+        // One voice must keep one label. The rolling window re-cuts the same
+        // speech on every request, so the id carrying a new phrase also carries
+        // a little of the one before it: its share of already-known speech fell
+        // under half, and because the fragment was long enough to be a
+        // participant the phrase minted the next number. A single-speaker
+        // recording then read "Speaker 1" and "Speaker 2" for one person.
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        SessionController control(&client, nullptr);
+        Settings settings;
+        settings.meetingDiarize = true;
+        settings.subtitlesDisplay = 2;         // transcript only: no translator call
+        control.configure(settings, SessionController::Mode::Subtitles);
+        control.running_ = true;
+        QSignalSpy captions(&control, &SessionController::caption);
+        QSignalSpy labels(&control, &SessionController::captionSpeaker);
+
+        const QVector<float> samples(16000 * 5, 0.05f);      // five seconds each
+        const QList<QByteArray> windows{
+            // 10-15 s: the first phrase, nothing to compare it with yet.
+            R"({"speaker_turns":[{"start_sample":0,"end_sample":80000,"speaker_id":"speaker_0","confidence":0.99}]})",
+            // 10-21 s: the same voice re-cut. speaker_1 starts 1.5 s inside
+            // the previous phrase, so only 20% of its 7.5 s is already known —
+            // under the half an id needs to be matched outright.
+            R"({"speaker_turns":[{"start_sample":0,"end_sample":80000,"speaker_id":"speaker_0","confidence":0.99},{"start_sample":56000,"end_sample":176000,"speaker_id":"speaker_1","confidence":0.98}]})",
+            // 10-27 s: one turn for the whole window, a third id name.
+            R"({"speaker_turns":[{"start_sample":0,"end_sample":272000,"speaker_id":"speaker_2","confidence":0.97}]})",
+        };
+        for (int i = 0; i < windows.size(); ++i) {
+            const int before = server.requests.size();
+            control.onUtterance(true, samples, 10.0 + i * 6.0);
+            QTRY_COMPARE(server.requests.size(), before + 2);   // diariser and recogniser
+            const int diar = requestIndex(server, "diarize", before);
+            const int asr = requestIndex(server, "transcriptions", before);
+            QVERIFY(diar >= 0 && asr >= 0);
+            server.reply(diar, windows[i]);
+            server.reply(asr, R"({"text":"one and the same voice"})");
+            QTRY_COMPARE(captions.size(), i + 1);
+        }
+
+        const auto labelOf = [&](int row) {
+            const quint64 id = captions.at(row).at(3).toULongLong();
+            for (const auto &args : labels) {
+                if (args.at(0).toULongLong() == id) return args.at(1).toString();
+            }
+            return captions.at(row).at(0).toString();
+        };
+        QTRY_COMPARE(labelOf(0), QString("Speaker 1"));
+        QTRY_COMPARE(labelOf(1), QString("Speaker 1"));
+        QTRY_COMPARE(labelOf(2), QString("Speaker 1"));
+        // No second number was handed out and then left unused: the phantom
+        // label used to stick to every later phrase of the same voice.
+        QCOMPARE(control.nextSpeaker_, 2);
+        QCOMPARE(control.knownTurns_.size(), 1);
         control.stop();
     }
 
@@ -2177,6 +2294,59 @@ private slots:
         overlay.hide();
     }
 
+    void captionOverlayKeepsAFollowingTranscript() {
+        // The card used to be two fixed-height labels inside one fixed-size
+        // window: a long phrase was clipped and every phrase overwrote the
+        // previous one. It is a scrolling transcript now.
+        Settings *settings = app_->settings();
+        const int display = settings->subtitlesDisplay;
+        const int size = settings->subtitlesTextSize;
+        settings->subtitlesDisplay = 0;
+        settings->subtitlesTextSize = 1;
+        CaptionOverlay overlay(app_);
+        auto *view = overlay.findChild<QTextEdit *>(QStringLiteral("captionView"));
+        auto *controller = overlay.findChild<SessionController *>();
+        QVERIFY(view && controller);
+        // No height cap: the caption scrolls instead of being cut in half.
+        QCOMPARE(view->maximumHeight(), QWIDGETSIZE_MAX);
+        // Frameless, so the strip needs its own grip and a real minimum size.
+        QVERIFY(overlay.findChild<QSizeGrip *>() != nullptr);
+        QVERIFY(overlay.minimumWidth() < 620);
+
+        QStringList translated;
+        for (int i = 0; i < 8; ++i) {
+            const QString heard = QStringLiteral("Captioned phrase %1 with enough words to wrap onto another row.").arg(i);
+            const QString ru = QStringLiteral("Переведённая фраза %1 с достаточным числом слов, чтобы занять несколько строк.").arg(i);
+            translated << ru;
+            QVERIFY(QMetaObject::invokeMethod(controller, "caption", Qt::DirectConnection,
+                                              Q_ARG(QString, QStringLiteral("Speaker 1")),
+                                              Q_ARG(QString, heard), Q_ARG(QString, ru),
+                                              Q_ARG(quint64, quint64(i + 1))));
+        }
+        QCoreApplication::processEvents();
+        // Every phrase stays in the card; the newest one does not replace it.
+        QVERIFY(view->toPlainText().contains(translated.first()));
+        QVERIFY(view->toPlainText().contains(translated.last()));
+        // Follow: the card's cursor is pinned to the newest caption. The
+        // scrollbar itself only has a range once a font can lay the text out.
+        QVERIFY(view->textCursor().atEnd());
+        QScrollBar *bar = view->verticalScrollBar();
+        QCOMPARE(bar->value(), bar->maximum());
+        overlay.show();
+        QCoreApplication::processEvents();
+        QVERIFY(overlay.grab().save("caption-overlay-transcript.png"));
+        // A label that resolves after the words were drawn repaints that one
+        // caption instead of appending the phrase a second time.
+        QVERIFY(QMetaObject::invokeMethod(controller, "captionSpeaker", Qt::DirectConnection,
+                                          Q_ARG(quint64, quint64(1)),
+                                          Q_ARG(QString, QStringLiteral("Speaker 2"))));
+        QVERIFY(view->toPlainText().contains(QStringLiteral("Speaker 2:")));
+        QCOMPARE(view->toPlainText().count(translated.first()), 1);
+        overlay.hide();
+        settings->subtitlesDisplay = display;
+        settings->subtitlesTextSize = size;
+    }
+
     void captionOverlayReadsTranscriptOnlyAtTheLargeSize() {
         // Transcript-only mode makes the caption the main content, so it is
         // drawn at the translation size. A later text-size change used to put
@@ -2188,19 +2358,23 @@ private slots:
         settings->subtitlesTextSize = 1;               // M: 15/21 px
         {
             CaptionOverlay overlay(app_);
-            auto *heard = overlay.findChild<QLabel *>(QStringLiteral("captionHeard"));
-            auto *translated = overlay.findChild<QLabel *>(QStringLiteral("captionTranslated"));
-            QVERIFY(heard && translated);
-            QVERIFY(!heard->isHidden());
-            QVERIFY(translated->isHidden());
-            QCOMPARE(heard->font().pixelSize(), 21);
+            auto *view = overlay.findChild<QTextEdit *>(QStringLiteral("captionView"));
+            auto *controller = overlay.findChild<SessionController *>();
+            QVERIFY(view && controller);
+            QCOMPARE(view->document()->defaultFont().pixelSize(), 21);
+            QVERIFY(QMetaObject::invokeMethod(controller, "caption", Qt::DirectConnection,
+                                              Q_ARG(QString, QString()),
+                                              Q_ARG(QString, QStringLiteral("только расшифровка")),
+                                              Q_ARG(QString, QString()),
+                                              Q_ARG(quint64, quint64(1))));
+            QVERIFY(view->toPlainText().contains(QStringLiteral("только расшифровка")));
         }
         settings->subtitlesTextSize = 2;               // L: 19/27 px
         {
             CaptionOverlay overlay(app_);
-            auto *heard = overlay.findChild<QLabel *>(QStringLiteral("captionHeard"));
-            QVERIFY(heard);
-            QCOMPARE(heard->font().pixelSize(), 27);
+            auto *view = overlay.findChild<QTextEdit *>(QStringLiteral("captionView"));
+            QVERIFY(view);
+            QCOMPARE(view->document()->defaultFont().pixelSize(), 27);
         }
         settings->subtitlesDisplay = display;
         settings->subtitlesTextSize = size;
@@ -2216,8 +2390,21 @@ private slots:
         QCOMPARE(window.isVisible(), true);
         QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveMine"))->isVisible());
         window.openMode(SessionWindow::Mode::Subtitles);
-        QVERIFY(window.findChild<QTextEdit *>(QStringLiteral("liveRemote"))->isVisible());
+        auto *remote = window.findChild<QTextEdit *>(QStringLiteral("liveRemote"));
+        QVERIFY(remote->isVisible());
         QVERIFY(!window.findChild<QTextEdit *>(QStringLiteral("liveMine"))->isVisible());
+        // A late speaker label repaints its own caption line.
+        auto *controller = window.findChild<SessionController *>();
+        QVERIFY(controller);
+        QVERIFY(QMetaObject::invokeMethod(controller, "caption", Qt::DirectConnection,
+                                          Q_ARG(QString, QString()),
+                                          Q_ARG(QString, QStringLiteral("spoken line")),
+                                          Q_ARG(QString, QStringLiteral("перевод")),
+                                          Q_ARG(quint64, quint64(7))));
+        QVERIFY(QMetaObject::invokeMethod(controller, "captionSpeaker", Qt::DirectConnection,
+                                          Q_ARG(quint64, quint64(7)),
+                                          Q_ARG(QString, QStringLiteral("Speaker 2"))));
+        QVERIFY(remote->toPlainText().contains(QStringLiteral("Speaker 2: spoken line")));
         window.hide();
     }
 
@@ -2741,12 +2928,25 @@ private slots:
         control.configure(settings, SessionController::Mode::Subtitles);
         control.running_ = true;
 
-        QList<QPair<QString, QString>> captions;
+        // Every caption is scored by the text and label it ends with: a label
+        // that resolves after the words is not a second caption.
+        QList<QPair<quint64, QPair<QString, QString>>> captions;   // id, label, words
+        QHash<quint64, QString> labelOf;
+        QHash<quint64, QString> textOf;        // words as the caption ends up
+        QHash<quint64, qint64> phraseAt;
         QStringList failures;
+        QElapsedTimer run;
+        run.start();
         connect(&control, &SessionController::caption, this,
-                [&captions](const QString &speaker, const QString &heard, const QString &) {
-                    captions.append(qMakePair(speaker, heard));
+                [&captions, &labelOf, &textOf](const QString &speaker,
+                                               const QString &heard,
+                                               const QString &, quint64 id) {
+                    captions.append(qMakePair(id, qMakePair(speaker, heard)));
+                    labelOf.insert(id, speaker);
+                    textOf.insert(id, heard);
                 });
+        connect(&control, &SessionController::captionSpeaker, this,
+                [&labelOf](quint64 id, const QString &speaker) { labelOf.insert(id, speaker); });
         connect(&control, &SessionController::error, this,
                 [&failures](const QString &message) { failures.append(message); });
 
@@ -2802,7 +3002,8 @@ private slots:
             return out;
         };
 
-        QStringList labels;                    // one entry per phrase, as the caption showed it
+        QStringList labels;                    // one entry per phrase, as the caption ended
+        QList<quint64> captionIds;             // caption id of that phrase, 0 when none appeared
         QStringList truth;                     // reference voice of that phrase
         QStringList heardText;                 // words the caption carried, possibly empty
         QStringList humanTruth;                // person the human annotation says spoke
@@ -2817,9 +3018,9 @@ private slots:
             control.onUtterance(true, call.mid(start, length), double(start) / 16000.0);
             QTRY_VERIFY_WITH_TIMEOUT(!control.busy_, 180000);
             const bool appeared = captions.size() > before;
-            const QString label = appeared ? captions.last().first : QString();
-            labels << label;
-            heardText << (appeared ? captions.last().second : QString());
+            captionIds << (appeared ? captions.last().first : quint64(0));
+            labels << (appeared ? captions.last().second.first : QString());
+            heardText << (appeared ? captions.last().second.second : QString());
             truth << referenceVoice(double(start) / 16000.0, double(start + length) / 16000.0);
             QMap<QString, double> spoken;
             for (const MetricTurn &turn : humanIn(double(start) / 16000.0, double(start + length) / 16000.0))
@@ -2832,10 +3033,33 @@ private slots:
             humanTruth << person;
             emitted << appeared;
             times << clock.elapsed();
-            if (!label.isEmpty()) seen.insert(label);
-            distinct << seen.size();
+            // How fast the recording is replayed matters to what a name can
+            // mean: separation runs a window of the last two minutes and takes
+            // seconds, so a feed much faster than real time forces gaps between
+            // windows and voices lose their identity across them. Zero keeps
+            // the historical pace; a positive value waits this long per phrase.
+            const int paceMs = qEnvironmentVariableIntValue("VOICEPANEL_SUBTITLES_PACE_MS");
+            if (paceMs > 0) QTest::qWait(paceMs);
+        }
+        // The recording ends while a window may still be running, and the panel
+        // keeps asking for windows until everything it heard is labelled. The
+        // score is of the finished transcript, so let that settle first.
+        int quietSeconds = 0;
+        QElapsedTimer drain;
+        drain.start();
+        while (quietSeconds < 3 && drain.elapsed() < 180000) {
+            QTest::qWait(1000);
+            quietSeconds = control.diarizing_ ? 0 : quietSeconds + 1;
         }
         control.stop();
+        for (int i = 0; i < labels.size(); ++i) {
+            if (captionIds[i]) {
+                labels[i] = labelOf.value(captionIds[i]);
+                heardText[i] = textOf.value(captionIds[i]);
+            }
+            if (!labels[i].isEmpty()) seen.insert(labels[i]);
+            distinct << seen.size();
+        }
 
         auto median = [](QList<qint64> values) {
             std::sort(values.begin(), values.end());
@@ -2848,7 +3072,20 @@ private slots:
         // participant: the window forgot someone. All voices must be found by
         // the first third, and nothing may be added afterwards.
         const int foundEarly = distinct.value(third - 1);
-
+        // Caption order. Ids are handed out in phrase order, so the caption
+        // that belongs to a phrase is the one that appeared while that phrase
+        // was being recognised. A caption that surfaced during a later phrase
+        // was deferred, and a phrase whose caption carries an older id was
+        // captioned out of turn.
+        int deferred = 0;
+        for (int i = 0; i < captionIds.size(); ++i)
+            if (captionIds[i] && captionIds[i] != quint64(i + 1)) ++deferred;
+        int outOfOrder = 0;
+        quint64 highest = 0;
+        for (const auto &caption : captions) {
+            if (caption.first < highest) ++outOfOrder;
+            highest = qMax(highest, caption.first);
+        }
         QDir().mkpath(QStringLiteral("runtime/reports/subtitles-long"));
         QJsonArray perPhrase, labelCounts;
         for (int i = 0; i < labels.size(); ++i) {
@@ -3068,15 +3305,19 @@ private slots:
                            {"unlabeled_captions", unlabeled},
                            {"median_steady_ms", double(steady)},
                            {"median_last_third_ms", double(lastThird)},
+                           {"caption_order", QJsonObject{{"deferred", deferred},
+                                                         {"out_of_order", outOfOrder}}},
                            {"errors", QJsonArray::fromStringList(failures)}};
         QFile out(QStringLiteral("runtime/reports/subtitles-long/result.json"));
         if (out.open(QIODevice::WriteOnly))
             out.write(QJsonDocument(report).toJson(QJsonDocument::Indented));
 
         qInfo("subtitles: %lld phrases, %lld labels, %d empty, %d without speaker, "
-              "median steady %lld -> last %lld ms; %s",
-              qint64(labels.size()), qint64(seen.size()), int(labels.size() - emittedCount),
-              unlabeled, steady, lastThird, qPrintable(voiceLines.join(", ")));
+              "median steady %lld -> last %lld ms; "
+              "caption order deferred %d, out of order %d; %s",
+              qint64(labels.size()), qint64(seen.size()), int(labels.size()) - captioned,
+              unlabeled, steady, lastThird, deferred, outOfOrder,
+              qPrintable(voiceLines.join(", ")));
         qInfo("quality: WER %.3f CER %.3f, speech covered %.1f%%, lost turns %.1f%% "
               "(%d of %d, %.1f%% of their words missing), empty captions %.1f%%, "
               "names %.1f%%, terms %.1f%% (%lld of %lld)",
@@ -3105,6 +3346,11 @@ private slots:
                                 .arg(foundEarly).arg(seen.size())));
         QVERIFY2(lastThird <= steady * 1.3 + 500,
                  qPrintable(QStringLiteral("steady %1 ms -> %2 ms").arg(steady).arg(lastThird)));
+        // Captions must not be held back or reordered: the id a phrase gets
+        // is the one its caption carries.
+        QVERIFY2(deferred == 0 && outOfOrder == 0,
+                 qPrintable(QStringLiteral("%1 captions were deferred, %2 out of order")
+                                .arg(deferred).arg(outOfOrder)));
         // Transcript quality. The ceilings leave room for a different recording
         // and model, not for a regression: the live run must carry most of what
         // the room said on the right names.
@@ -3123,6 +3369,114 @@ private slots:
         QVERIFY2(nameAccuracy >= 0.8,
                  qPrintable(QStringLiteral("labels named the right person on %1 % of captions")
                                 .arg(nameAccuracy * 100.0, 0, 'f', 1)));
+    }
+
+    // The other direction from the caption acceptance: one real person must keep
+    // one label for a whole recording. The three-voice fixture proves the window
+    // separates people; it cannot prove the window does not invent a participant,
+    // because a recording with three voices always has labels to hand out. This
+    // replays a real single-speaker recording at a level the VAD hears:
+    //   runtime/bench/single-voice-16k.wav   (a real voice, looped to ~2.5 min)
+    //   VOICEPANEL_SUBTITLES_SINGLE_BENCH=http://127.0.0.1:8080
+    void singleVoiceRecordingKeepsOneLabel() {
+        const QString url = qEnvironmentVariable("VOICEPANEL_SUBTITLES_SINGLE_BENCH");
+        if (url.isEmpty())
+            QSKIP("Opt-in: set VOICEPANEL_SUBTITLES_SINGLE_BENCH to the service URL for the single-speaker run");
+        const QVector<float> call = readWav16k(QStringLiteral("runtime/bench/single-voice-16k.wav"));
+        QVERIFY2(call.size() > 16000 * 120, "fixture missing: two minutes of one 16 kHz voice");
+
+        Settings settings = *app_->settings();
+        settings.meetingDiarize = true;
+        settings.subtitlesDisplay = 2;         // the words and the label are the subject
+        settings.subtitlesLanguage = 0;
+        app_->service()->setBaseUrl(url);
+        SessionController control(app_->service(), nullptr);
+        control.configure(settings, SessionController::Mode::Subtitles);
+        control.running_ = true;
+
+        QList<QPair<quint64, QPair<QString, QString>>> captions;   // id, label, words
+        QHash<quint64, QString> labelOf;
+        QStringList failures;
+        connect(&control, &SessionController::caption, this,
+                [&captions, &labelOf](const QString &speaker, const QString &heard,
+                                      const QString &, quint64 id) {
+                    captions.append(qMakePair(id, qMakePair(speaker, heard)));
+                    labelOf.insert(id, speaker);
+                });
+        connect(&control, &SessionController::captionSpeaker, this,
+                [&labelOf](quint64 id, const QString &speaker) { labelOf.insert(id, speaker); });
+        connect(&control, &SessionController::error, this,
+                [&failures](const QString &message) { failures.append(message); });
+
+        const auto phrases = splitPhrases(call);
+        QVERIFY2(phrases.size() >= 15,
+                 qPrintable(QStringLiteral("only %1 phrases").arg(phrases.size())));
+        QList<qint64> times;
+        for (const auto &[start, length] : phrases) {
+            QElapsedTimer clock;
+            clock.start();
+            control.onUtterance(true, call.mid(start, length), double(start) / 16000.0);
+            QTRY_VERIFY_WITH_TIMEOUT(!control.busy_, 180000);
+            times << clock.elapsed();
+        }
+        control.stop();
+
+        // One label for one voice, from the first captioned phrase to the last:
+        // a second label here is the overlay renaming a person mid-recording.
+        QStringList labels;
+        QStringList heard;
+        for (const auto &caption : captions) {
+            if (caption.second.second.trimmed().isEmpty()) continue;
+            // The label as the line ends up: a repaint is still one voice.
+            labels << labelOf.value(caption.first);
+            heard << caption.second.second;
+        }
+        QVERIFY2(!labels.isEmpty(), "no caption carried words");
+        const QSet<QString> distinct(labels.begin(), labels.end());
+        int unlabeled = 0;
+        for (const QString &label : labels) if (label.isEmpty()) ++unlabeled;
+
+        auto median = [](QList<qint64> values) {
+            std::sort(values.begin(), values.end());
+            return values.value(values.size() / 2);
+        };
+        const int third = qMax(1, times.size() / 3);
+        const qint64 steady = median(times.mid(third, third));
+        const qint64 lastThird = median(times.mid(times.size() - third));
+
+        QDir().mkpath(QStringLiteral("runtime/reports/subtitles-single"));
+        QJsonArray perPhrase;
+        for (int i = 0; i < phrases.size(); ++i) {
+            perPhrase.append(QJsonObject{{"speaker", i < labels.size() ? labels[i] : QString()},
+                                         {"ms", double(times.value(i))},
+                                         {"start_s", double(phrases[i].first) / 16000.0},
+                                         {"text", i < heard.size() ? heard[i] : QString()}});
+        }
+        const QStringList seen = QStringList(distinct.begin(), distinct.end());
+        QJsonObject report{{"phrases", perPhrase},
+                           {"labels", QJsonArray::fromStringList(seen)},
+                           {"captioned", int(labels.size())},
+                           {"unlabeled", unlabeled},
+                           {"median_steady_ms", double(steady)},
+                           {"median_last_third_ms", double(lastThird)},
+                           {"errors", QJsonArray::fromStringList(failures)}};
+        QFile out(QStringLiteral("runtime/reports/subtitles-single/result.json"));
+        if (out.open(QIODevice::WriteOnly))
+            out.write(QJsonDocument(report).toJson(QJsonDocument::Indented));
+
+        qInfo("single voice: %lld phrases, %lld captions, %lld labels (%s), "
+              "median steady %lld -> last %lld ms",
+              qint64(phrases.size()), qint64(labels.size()), qint64(distinct.size()),
+              qPrintable(seen.join(", ")), steady, lastThird);
+        QVERIFY2(failures.isEmpty(), qPrintable(failures.join("; ").left(300)));
+        QVERIFY2(distinct.size() == 1,
+                 qPrintable(QStringLiteral("one voice got %1 labels: %2")
+                                .arg(distinct.size()).arg(seen.join(", "))));
+        QVERIFY2(unlabeled * 5 <= labels.size(),
+                 qPrintable(QStringLiteral("%1 of %2 captions had no label")
+                                .arg(unlabeled).arg(labels.size())));
+        QVERIFY2(lastThird <= steady * 1.3 + 500,
+                 qPrintable(QStringLiteral("steady %1 ms -> %2 ms").arg(steady).arg(lastThird)));
     }
 
     void captureWindows() {

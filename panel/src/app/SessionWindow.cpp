@@ -27,7 +27,12 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollBar>
 #include <QSizeGrip>
+#include <QTextBlock>
+#include <QTextBlockFormat>
+#include <QTextCharFormat>
+#include <QTextCursor>
 #include <QSplitter>
 #include <QTextEdit>
 #include <QTextStream>
@@ -37,6 +42,11 @@
 namespace VoicePanel {
 
 namespace {
+
+// The phrase id travels with its caption block, so a late speaker label can
+// replace the prefix of the exact line it belongs to.
+constexpr int kPhraseIdProperty = QTextFormat::UserProperty + 1;
+
 QString clock(double seconds) {
     const int total = int(seconds);
     return QStringLiteral("%1:%2").arg(total / 60, 2, 10, QLatin1Char('0'))
@@ -62,12 +72,14 @@ SessionWindow::SessionWindow(PanelApp *app, QWidget *parent)
     updateVoiceHint();
 
     connect(controller_, &SessionController::caption, this,
-            [this](const QString &speaker, const QString &heard, const QString &translated) {
+            [this](const QString &speaker, const QString &heard, const QString &translated,
+                   quint64 id) {
         // Interpreter captions have no speaker; subtitles carry the label of the
         // voice the rolling diarisation window recognised in this phrase.
-        const QString tag = speaker.isEmpty() ? QString() : speaker + QStringLiteral(": ");
-        appendRemote(tag + heard, translated);   // subtitles: one pane, both lines
+        appendRemote(speaker, heard, translated, id);   // subtitles: one pane, both lines
     });
+    connect(controller_, &SessionController::captionSpeaker, this,
+            [this](quint64 id, const QString &speaker) { relabelRemote(id, speaker); });
     connect(controller_, &SessionController::outgoing, this,
             [this](const QString &said, const QString &voiced) {
         appendMine(said, voiced);
@@ -523,13 +535,75 @@ void SessionWindow::startListening() {
     if (mode_ == Mode::Interpreter) statusLabel_->setText(speakingSummary());
 }
 
-void SessionWindow::appendRemote(const QString &heard, const QString &translated) {
+void SessionWindow::writeRemoteRuns(QTextCursor &cursor, const RemoteCaption &caption) {
     // Amber marker: the call side. The translation reads heavier than the
     // heard line, but the two sizes stay close (the approved design).
-    remoteEdit_->append(QStringLiteral(
-        "<span style=\"color:#ee9a3a\">&#9679;</span> "
-        "<span style=\"color:#c9bd9a\">%1</span><br><b>%2</b>")
-        .arg(heard.toHtmlEscaped(), translated.toHtmlEscaped()));
+    QTextCharFormat marker;
+    marker.setForeground(QColor(QStringLiteral("#ee9a3a")));
+    cursor.insertText(QStringLiteral("\u25CF "), marker);
+    QTextCharFormat heard;
+    heard.setForeground(QColor(QStringLiteral("#c9bd9a")));
+    const QString tag = caption.speaker.isEmpty() ? QString()
+                                                 : caption.speaker + QStringLiteral(": ");
+    cursor.insertText(tag + caption.heard, heard);
+    cursor.insertText(QString(QChar(QChar::LineSeparator)), heard);
+    QTextCharFormat strong;
+    QFont font = cursor.document()->defaultFont();
+    font.setWeight(QFont::Bold);
+    strong.setFont(font);
+    cursor.insertText(caption.translated, strong);
+}
+
+void SessionWindow::appendRemote(const QString &speaker, const QString &heard,
+                                 const QString &translated, quint64 id) {
+    const RemoteCaption caption{id, speaker, heard, translated};
+    remoteCaptions_.append(caption);
+    QScrollBar *bar = remoteEdit_->verticalScrollBar();
+    const bool follow = bar->value() >= bar->maximum() - 4;
+    QTextCursor cursor(remoteEdit_->document());
+    cursor.movePosition(QTextCursor::End);
+    QTextBlockFormat block;
+    block.setBottomMargin(8);
+    block.setProperty(kPhraseIdProperty, qlonglong(id));
+    if (remoteEdit_->document()->isEmpty()) cursor.setBlockFormat(block);
+    else cursor.insertBlock(block);
+    writeRemoteRuns(cursor, caption);
+    if (follow) {
+        remoteEdit_->moveCursor(QTextCursor::End);
+        remoteEdit_->ensureCursorVisible();
+    }
+}
+
+void SessionWindow::relabelRemote(quint64 id, const QString &speaker) {
+    if (!id) return;
+    int index = -1;
+    for (int i = 0; i < remoteCaptions_.size(); ++i) {
+        if (remoteCaptions_[i].id == id) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0 || remoteCaptions_[index].speaker == speaker) return;
+    remoteCaptions_[index].speaker = speaker;
+    paintRemote(id, remoteCaptions_[index]);
+}
+
+void SessionWindow::paintRemote(quint64 id, const RemoteCaption &caption) {
+    for (QTextBlock block = remoteEdit_->document()->begin(); block.isValid(); block = block.next()) {
+        if (block.blockFormat().property(kPhraseIdProperty).toLongLong() != qlonglong(id)) continue;
+        const bool follow = remoteEdit_->verticalScrollBar()->value()
+                            >= remoteEdit_->verticalScrollBar()->maximum() - 4;
+        QTextCursor cursor(block);
+        cursor.movePosition(QTextCursor::StartOfBlock);
+        cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+        cursor.removeSelectedText();
+        writeRemoteRuns(cursor, caption);
+        if (follow) {
+            remoteEdit_->moveCursor(QTextCursor::End);
+            remoteEdit_->ensureCursorVisible();
+        }
+        return;
+    }
 }
 
 void SessionWindow::appendMine(const QString &said, const QString &voiced) {
@@ -540,6 +614,7 @@ void SessionWindow::appendMine(const QString &said, const QString &voiced) {
 }
 
 void SessionWindow::clearPanes() {
+    remoteCaptions_.clear();
     remoteEdit_->clear();
     mineEdit_->clear();
 }

@@ -76,6 +76,7 @@ struct Settings {
     // window
     QByteArray compactGeometry;
     QByteArray editorGeometry;
+    QByteArray subtitlesGeometry;      // the overlay is frameless: its size is ours to remember
     QString dockPosition = "right";   // free | top | bottom | left | right
 
     void load();

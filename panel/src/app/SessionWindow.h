@@ -1,10 +1,12 @@
 #pragma once
 #include <QDialog>
+#include <QList>
 
 class QComboBox;
 class QFrame;
 class QLabel;
 class QPushButton;
+class QTextCursor;
 class QTextEdit;
 
 namespace VoicePanel {
@@ -55,8 +57,20 @@ private:
     bool speaksToCall() const;
     QString sessionVoiceName() const;
     QString speakingSummary() const;
-    void appendRemote(const QString &heard, const QString &translated);
+    void appendRemote(const QString &speaker, const QString &heard, const QString &translated,
+                      quint64 id = 0);
     void appendMine(const QString &said, const QString &voiced);
+    // The diariser answers after the words are on screen; the caption it
+    // belongs to is repainted in place.
+    struct RemoteCaption {
+        quint64 id = 0;
+        QString speaker;
+        QString heard;
+        QString translated;
+    };
+    void writeRemoteRuns(QTextCursor &cursor, const RemoteCaption &caption);
+    void relabelRemote(quint64 id, const QString &speaker);
+    void paintRemote(quint64 id, const RemoteCaption &caption);
     void clearPanes();
     QString settingsSafeName() const;
 
@@ -88,6 +102,7 @@ private:
     QWidget *mineBox_ = nullptr;
     QTextEdit *remoteEdit_ = nullptr;     // the call half (interpreter) / captions (subtitles)
     QTextEdit *mineEdit_ = nullptr;       // the microphone half
+    QList<RemoteCaption> remoteCaptions_;
 
     bool running_ = false;
     int previousOutputDevice_ = -1;

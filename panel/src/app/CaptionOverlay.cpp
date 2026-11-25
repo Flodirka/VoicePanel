@@ -9,16 +9,64 @@
 #include "core/TtsPlayer.h"
 
 #include <QComboBox>
-#include <QFrame>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QKeyEvent>
-#include <QLabel>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QPainter>
+#include <QScrollBar>
+#include <QSizeGrip>
+#include <QTextBlock>
+#include <QTextBlockFormat>
+#include <QTextCharFormat>
+#include <QTextCursor>
+#include <QTextEdit>
+#include <QTextOption>
 #include <QVBoxLayout>
 
 namespace VoicePanel {
+
+namespace {
+
+constexpr int kMinimumWidth = 360;
+constexpr int kMinimumHeight = 130;
+constexpr int kResizeBorder = 8;
+constexpr int kBlockGap = 8;          // px between caption blocks
+// The phrase id travels with its block, so a late speaker label can replace
+// the prefix of the exact caption it belongs to.
+constexpr int kPhraseIdProperty = QTextFormat::UserProperty + 1;
+const QColor kCaptionInk(250, 241, 204);
+const QColor kHeardInk(201, 189, 154);
+const QColor kNoticeInk(224, 145, 127);
+
+// A run of caption text with its own size and weight: the heard line is the
+// footnote, the translation is the caption. Colours and sizes are explicit so
+// the card never depends on the application theme's QTextEdit font.
+void insertRun(QTextCursor &cursor, const QString &text, int pixelSize,
+               const QColor &color, bool bold) {
+    QTextCharFormat format;
+    format.setForeground(color);
+    QFont font = cursor.document()->defaultFont();
+    font.setPixelSize(pixelSize);
+    font.setWeight(bold ? QFont::DemiBold : QFont::Normal);
+    format.setFont(font);
+    cursor.insertText(text, format);
+}
+
+Qt::CursorShape cursorFor(Qt::Edges edges) {
+    const bool left = edges & Qt::LeftEdge;
+    const bool right = edges & Qt::RightEdge;
+    const bool top = edges & Qt::TopEdge;
+    const bool bottom = edges & Qt::BottomEdge;
+    if ((left && top) || (right && bottom)) return Qt::SizeFDiagCursor;
+    if ((right && top) || (left && bottom)) return Qt::SizeBDiagCursor;
+    if (left || right) return Qt::SizeHorCursor;
+    if (top || bottom) return Qt::SizeVerCursor;
+    return Qt::ArrowCursor;
+}
+
+} // namespace
 
 CaptionOverlay::CaptionOverlay(PanelApp *app, QWidget *parent)
     : QWidget(parent, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint), app_(app) {
@@ -31,22 +79,30 @@ CaptionOverlay::CaptionOverlay(PanelApp *app, QWidget *parent)
     setObjectName(QStringLiteral("captionOverlay"));
     setWindowIcon(UiKit::icon("mic"));
     setWindowTitle(tr("VoicePanel — subtitles"));
-    resize(560, 150);
+    // A frameless window has no system border to drag, so it needs its own
+    // minimum size and remembers the size the user chose.
+    setMinimumSize(kMinimumWidth, kMinimumHeight);
+    resize(620, 220);
+    setMouseTracking(true);
+    if (!app_->settings()->subtitlesGeometry.isEmpty()) {
+        restoreGeometry(app_->settings()->subtitlesGeometry);
+    }
 
     controller_ = new SessionController(app_->service(), app_->tts(), this);
     connect(controller_, &SessionController::caption, this,
-            [this](const QString &speaker, const QString &heard, const QString &translated) {
-        // The label follows whichever line is on screen: the heard line normally,
-        // the translation when that is the only one shown. Transcript-only mode
-        // shows the heard line at the translation size instead.
-        const QString tag = speaker.isEmpty() ? QString() : speaker + QStringLiteral(": ");
-        const int mode = app_->settings()->subtitlesDisplay;
-        heard_->setText(mode == 1 ? QString() : tag + heard);
-        translated_->setText(mode == 2 ? QString()
-                                       : (mode == 1 ? tag : QString()) + translated);
-    });
+            [this](const QString &speaker, const QString &heard, const QString &translated,
+                   quint64 id) { addCaption(speaker, heard, translated, id); });
+    connect(controller_, &SessionController::captionSpeaker, this,
+            [this](quint64 id, const QString &speaker) { relabel(id, speaker); });
     connect(controller_, &SessionController::error, this,
-            [this](const QString &message) { translated_->setText(message); });
+            [this](const QString &message) { addNotice(message); });
+    connect(controller_, &SessionController::captureFailed, this,
+            [this](const QString &message) {
+        // Captions cannot continue without the source; leaving the badge
+        // "recording" over a dead stream was the worst part of a failed start.
+        end();
+        addNotice(tr("Capture stopped: %1").arg(message));
+    });
 
     buildUi();
     buildSettings();
@@ -55,12 +111,15 @@ CaptionOverlay::CaptionOverlay(PanelApp *app, QWidget *parent)
     applyTextSize();
 }
 
-CaptionOverlay::~CaptionOverlay() { end(); }
+CaptionOverlay::~CaptionOverlay() {
+    end();
+    saveGeometryToSettings();
+}
 
 void CaptionOverlay::buildUi() {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(10, 8, 10, 10);
-    layout->setSpacing(0);
+    layout->setContentsMargins(10, 8, 10, 8);
+    layout->setSpacing(6);
 
     // Compact toolbar: settings, direction, then state and close. Everything
     // else lives in the popover, so the strip stays caption-sized.
@@ -99,38 +158,50 @@ void CaptionOverlay::buildUi() {
     layout->addLayout(row);
     settingsButton_ = settingsButton;
 
-    // Caption card: the heard line muted, a hairline, the translation large —
-    // the mobile-subtitles layout the design was approved against.
-    auto *card = new QVBoxLayout;
-    card->setContentsMargins(14, 2, 14, 4);
-    card->setSpacing(0);
-    heard_ = new QLabel(tr("Choose a source in settings, then play the audio."));
-    heard_->setObjectName(QStringLiteral("captionHeard"));
-    heard_->setWordWrap(true);
-    heard_->setMaximumHeight(44);
-    card->addWidget(heard_);
+    // Caption card: a scrolling transcript, the heard line muted above the
+    // translation. It replaces the two fixed-height labels that clipped long
+    // phrases: every caption is kept, the newest one stays in view, and the
+    // user can scroll back through what was said.
+    captions_ = new QTextEdit;
+    captions_->setObjectName(QStringLiteral("captionView"));
+    captions_->setReadOnly(true);
+    captions_->setAcceptRichText(true);
+    captions_->setFrameShape(QFrame::NoFrame);
+    captions_->setLineWrapMode(QTextEdit::WidgetWidth);
+    captions_->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    captions_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    captions_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    captions_->setFocusPolicy(Qt::NoFocus);
+    captions_->setMinimumHeight(48);
+    captions_->document()->setDocumentMargin(0);
+    QPalette palette = captions_->palette();
+    palette.setColor(QPalette::Base, Qt::transparent);
+    palette.setColor(QPalette::Text, kCaptionInk);
+    captions_->setPalette(palette);
+    captions_->viewport()->setAutoFillBackground(false);
+    layout->addWidget(captions_, 1);
 
-    divider_ = new QFrame;
-    divider_->setFrameShape(QFrame::HLine);
-    divider_->setFrameShadow(QFrame::Plain);
-    divider_->setFixedHeight(1);
-    divider_->setStyleSheet(QStringLiteral("background: rgba(250, 241, 204, 0.16);"));
-    card->addWidget(divider_);
-
-    translated_ = new QLabel(QString());
-    translated_->setObjectName(QStringLiteral("captionTranslated"));
-    translated_->setWordWrap(true);
-    translated_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    translated_->setMaximumHeight(64);
-    card->addWidget(translated_);
-    layout->addLayout(card, 1);
+    // The bottom row carries the grip: with a frameless window this is the
+    // visible hint that the panel can be resized at all.
+    auto *foot = new QHBoxLayout;
+    foot->setContentsMargins(0, 0, 0, 0);
+    foot->setSpacing(0);
+    foot->addStretch();
+    grip_ = new QSizeGrip(this);
+    grip_->setObjectName(QStringLiteral("captionGrip"));
+    grip_->setFixedSize(14, 14);
+    grip_->setToolTip(tr("Drag to resize"));
+    foot->addWidget(grip_);
+    layout->addLayout(foot);
 
     setStyleSheet(QStringLiteral(
-        "#captionHeard { color: #c9bd9a; background: transparent; }"
-        "#captionTranslated { color: #faf1cc; background: transparent; }"
+        "#captionView { background: transparent; border: none; padding: 0;"
+        " color: #faf1cc; }"
         "#captionOverlay QComboBox { background-color: #19141f; color: #faf1cc;"
         " border: 1px solid rgba(250, 241, 204, 0.16); border-radius: 8px; padding: 3px 8px; }"
         "#captionOverlay QLabel { color: #faf1cc; background: transparent; }"));
+
+    showPlaceholder();
 
     connect(close_, &QPushButton::clicked, this, [this] {
         end();
@@ -190,33 +261,24 @@ void CaptionOverlay::buildSettings() {
 }
 
 void CaptionOverlay::applyDisplayMode() {
-    const int mode = app_->settings()->subtitlesDisplay;
-    const bool showHeard = mode == 0 || mode == 2;
-    const bool showTranslated = mode == 0 || mode == 1;
-    heard_->setVisible(showHeard);
-    translated_->setVisible(showTranslated);
-    divider_->setVisible(mode == 0);
-    // Sizes depend on the mode, so they are always applied together with it.
-    applyTextSize();
+    // Both display mode and text size decide what each block looks like, so
+    // the card is re-rendered from the kept captions instead of only changing
+    // what future phrases show.
+    renderCaptions();
 }
 
 void CaptionOverlay::applyTextSize() {
     const auto sizes = textSizes();
-    // Transcript-only reads at the translation size: the caption is the main
-    // content in that mode, not a footnote. Keeping that decision here (and not
-    // only in applyDisplayMode) means a text-size change cannot shrink it back.
-    const bool transcriptOnly = app_->settings()->subtitlesDisplay == 2;
-    QFont heard = heard_->font();
-    heard.setPixelSize(transcriptOnly ? sizes.translated : sizes.heard);
-    heard.setWeight(transcriptOnly ? QFont::DemiBold : QFont::Normal);
-    heard_->setFont(heard);
-    QFont big = translated_->font();
-    big.setPixelSize(sizes.translated);
-    big.setWeight(QFont::DemiBold);
-    translated_->setFont(big);
-    // Two lines max for either line, so the strip never grows mid-video.
-    heard_->setMaximumHeight((transcriptOnly ? sizes.translated : sizes.heard) * 3);
-    translated_->setMaximumHeight(sizes.translated * 3);
+    QFont base = captions_->font();
+    base.setPixelSize(sizes.translated);
+    captions_->setFont(base);
+    captions_->document()->setDefaultFont(base);
+    // The application theme styles QTextEdit; an ID selector on the card wins,
+    // and it carries the chosen size so the theme cannot shrink the captions.
+    captions_->setStyleSheet(QStringLiteral(
+        "#captionView { background: transparent; border: none; padding: 0;"
+        " color: #faf1cc; font-size: %1px; }").arg(sizes.translated));
+    renderCaptions();
 }
 
 CaptionOverlay::TextSizes CaptionOverlay::textSizes() const {
@@ -225,6 +287,155 @@ CaptionOverlay::TextSizes CaptionOverlay::textSizes() const {
     case 2: return {19, 27};
     default: return {15, 21};
     }
+}
+
+void CaptionOverlay::showPlaceholder() {
+    QTextCursor cursor(captions_->document());
+    cursor.movePosition(QTextCursor::End);
+    insertRun(cursor, tr("Choose a source in settings, then play the audio."),
+              textSizes().heard, kHeardInk, false);
+    placeholderShown_ = true;
+}
+
+void CaptionOverlay::clearCaptions() {
+    history_.clear();
+    captions_->clear();
+    placeholderShown_ = false;
+}
+
+void CaptionOverlay::renderCaptions() {
+    captions_->clear();
+    placeholderShown_ = false;
+    if (history_.isEmpty()) {
+        showPlaceholder();
+        return;
+    }
+    for (const CaptionLine &line : history_) appendBlock(line, false);
+    scrollToNewest();
+}
+
+bool CaptionOverlay::following() const {
+    // The newest caption is followed unless the user scrolled back to read
+    // something; a caption arriving then must not yank the view away.
+    const QScrollBar *bar = captions_->verticalScrollBar();
+    return bar->value() >= bar->maximum() - 4;
+}
+
+void CaptionOverlay::scrollToNewest() {
+    captions_->moveCursor(QTextCursor::End);
+    captions_->ensureCursorVisible();
+    QScrollBar *bar = captions_->verticalScrollBar();
+    bar->setValue(bar->maximum());
+}
+
+void CaptionOverlay::writeRuns(QTextCursor &cursor, const CaptionLine &line) {
+    const auto sizes = textSizes();
+    const int mode = app_->settings()->subtitlesDisplay;
+    const bool transcriptOnly = mode == 2 && !line.notice;
+    const bool showHeard = line.notice || mode == 0 || mode == 2;
+    const bool showTranslated = !line.notice && (mode == 0 || mode == 1);
+    const QString tag = line.speaker.isEmpty() ? QString()
+                                               : line.speaker + QStringLiteral(": ");
+
+    if (line.notice) {
+        insertRun(cursor, line.heard, sizes.heard, kNoticeInk, false);
+        return;
+    }
+    if (showHeard) {
+        // Transcript-only makes the caption the main content, so it reads at
+        // the translation size instead of the footnote size.
+        insertRun(cursor, tag + line.heard,
+                  transcriptOnly ? sizes.translated : sizes.heard,
+                  transcriptOnly ? kCaptionInk : kHeardInk,
+                  transcriptOnly);
+        // One block per caption: the two lines are separated inside it, so a
+        // late speaker label rewrites just this block.
+        if (showTranslated) {
+            QTextCharFormat separator;
+            separator.setForeground(kHeardInk);
+            cursor.insertText(QString(QChar(QChar::LineSeparator)), separator);
+        }
+    }
+    if (showTranslated) {
+        insertRun(cursor, showHeard ? line.translated : tag + line.translated,
+                  sizes.translated, kCaptionInk, true);
+    }
+}
+
+void CaptionOverlay::appendBlock(const CaptionLine &line, bool follow) {
+    QTextCursor cursor(captions_->document());
+    cursor.movePosition(QTextCursor::End);
+    QTextBlockFormat block;
+    block.setBottomMargin(kBlockGap);
+    block.setProperty(kPhraseIdProperty, qlonglong(line.id));
+    if (captions_->document()->isEmpty()) {
+        cursor.setBlockFormat(block);
+    } else {
+        cursor.insertBlock(block);
+    }
+    writeRuns(cursor, line);
+    if (follow) scrollToNewest();
+}
+
+void CaptionOverlay::addCaption(const QString &speaker, const QString &heard,
+                                const QString &translated, quint64 id) {
+    if (heard.isEmpty() && translated.isEmpty()) return;
+    const bool follow = following();
+    if (placeholderShown_) {
+        captions_->clear();
+        placeholderShown_ = false;
+    }
+    CaptionLine line;
+    line.id = id;
+    line.speaker = speaker;
+    line.heard = heard;
+    line.translated = translated;
+    history_.append(line);
+    appendBlock(line, follow);
+}
+
+void CaptionOverlay::relabel(quint64 id, const QString &speaker) {
+    if (!id) return;
+    int index = -1;
+    for (int i = 0; i < history_.size(); ++i) {
+        if (history_[i].id == id) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0 || history_[index].speaker == speaker) return;
+    history_[index].speaker = speaker;
+    paintLine(id, history_[index]);
+}
+
+void CaptionOverlay::paintLine(quint64 id, const CaptionLine &line) {
+    // Repaint that caption's block in place: the words and the reader's
+    // scroll position stay where they are.
+    for (QTextBlock block = captions_->document()->begin(); block.isValid(); block = block.next()) {
+        if (block.blockFormat().property(kPhraseIdProperty).toLongLong() != qlonglong(id)) continue;
+        const bool follow = following();
+        QTextCursor cursor(block);
+        cursor.movePosition(QTextCursor::StartOfBlock);
+        cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+        cursor.removeSelectedText();
+        writeRuns(cursor, line);
+        if (follow) scrollToNewest();
+        return;
+    }
+}
+
+void CaptionOverlay::addNotice(const QString &text) {
+    if (text.isEmpty()) return;
+    const bool follow = following();
+    if (placeholderShown_) {
+        captions_->clear();
+        placeholderShown_ = false;
+    }
+    CaptionLine line;
+    line.heard = text;
+    line.notice = true;
+    history_.append(line);
+    appendBlock(line, follow);
 }
 
 void CaptionOverlay::refreshSources() {
@@ -282,13 +493,17 @@ void CaptionOverlay::begin() {
     refreshSources();
     if (int row = source_->findData(keep); row >= 0) source_->setCurrentIndex(row);
 
+    // A new session starts with a clean card: captions from another source or
+    // an earlier run would read as if they had just been spoken.
+    clearCaptions();
+
     controller_->configure(*app_->settings(), SessionController::Mode::Subtitles);
     controller_->setDirection(direction_->currentData().toInt());
     QString vadPath = app_->vadPath();
     if (vadPath.isEmpty()) vadPath = app_->settings()->vadModel;
     if (vadPath.isEmpty()) vadPath = QStringLiteral("models/silero_vad.onnx");
     if (!controller_->start(vadPath)) {
-        translated_->setText(tr("Could not capture that source — pick another one in settings."));
+        addNotice(tr("Could not capture that source — pick another one in settings."));
         show();
         raise();
         return;
@@ -314,6 +529,31 @@ void CaptionOverlay::paintEvent(QPaintEvent *) {
     painter.setPen(QPen(QColor(250, 241, 204, 40), 1.0));
     painter.setBrush(QColor(17, 14, 22, 238));   // surface-0, near opaque
     painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
+
+    // The platform's size grip is drawn in the system's dark ink, which is
+    // invisible on this card. Three hairlines in the corner say "drag me".
+    painter.setPen(QPen(QColor(250, 241, 204, 80), 1.2));
+    for (int i = 1; i <= 3; ++i) {
+        painter.drawLine(width() - 4 - i * 4, height() - 4,
+                         width() - 4, height() - 4 - i * 4);
+    }
+}
+
+Qt::Edges CaptionOverlay::edgesAt(const QPoint &pos) const {
+    Qt::Edges edges;
+    if (pos.x() <= kResizeBorder) edges |= Qt::LeftEdge;
+    if (pos.x() >= width() - kResizeBorder) edges |= Qt::RightEdge;
+    if (pos.y() <= kResizeBorder) edges |= Qt::TopEdge;
+    if (pos.y() >= height() - kResizeBorder) edges |= Qt::BottomEdge;
+    return edges;
+}
+
+void CaptionOverlay::updateHoverCursor(const QPoint &pos) {
+    const Qt::Edges edges = edgesAt(pos);
+    // The resize border is the outer margin: the caption view sits inside it,
+    // so it owns the pointer over the text and the text keeps its own cursor.
+    if (edges == Qt::Edges()) unsetCursor();
+    else setCursor(cursorFor(edges));
 }
 
 void CaptionOverlay::keyPressEvent(QKeyEvent *event) {
@@ -327,6 +567,14 @@ void CaptionOverlay::keyPressEvent(QKeyEvent *event) {
 
 void CaptionOverlay::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::LeftButton) {
+        const Qt::Edges edges = edgesAt(event->position().toPoint());
+        if (edges != Qt::Edges()) {
+            resizeEdges_ = edges;
+            resizeStartGeometry_ = geometry();
+            resizeStartGlobal_ = event->globalPosition().toPoint();
+            event->accept();
+            return;
+        }
         dragging_ = true;
         dragOffset_ = event->globalPosition().toPoint() - frameGeometry().topLeft();
         event->accept();
@@ -336,17 +584,63 @@ void CaptionOverlay::mousePressEvent(QMouseEvent *event) {
 }
 
 void CaptionOverlay::mouseMoveEvent(QMouseEvent *event) {
+    if (resizeEdges_ != Qt::Edges() && (event->buttons() & Qt::LeftButton)) {
+        const QPoint delta = event->globalPosition().toPoint() - resizeStartGlobal_;
+        QRect rect = resizeStartGeometry_;
+        const int minW = minimumWidth();
+        const int minH = minimumHeight();
+        if (resizeEdges_ & Qt::LeftEdge) {
+            rect.setLeft(qMin(rect.left() + delta.x(), rect.right() - minW + 1));
+        }
+        if (resizeEdges_ & Qt::RightEdge) {
+            rect.setRight(qMax(rect.right() + delta.x(), rect.left() + minW - 1));
+        }
+        if (resizeEdges_ & Qt::TopEdge) {
+            rect.setTop(qMin(rect.top() + delta.y(), rect.bottom() - minH + 1));
+        }
+        if (resizeEdges_ & Qt::BottomEdge) {
+            rect.setBottom(qMax(rect.bottom() + delta.y(), rect.top() + minH - 1));
+        }
+        setGeometry(rect);
+        event->accept();
+        return;
+    }
     if (dragging_ && (event->buttons() & Qt::LeftButton)) {
         move(event->globalPosition().toPoint() - dragOffset_);
         event->accept();
         return;
     }
+    updateHoverCursor(event->position().toPoint());
     QWidget::mouseMoveEvent(event);
 }
 
 void CaptionOverlay::mouseReleaseEvent(QMouseEvent *event) {
+    const bool changed = dragging_ || resizeEdges_ != Qt::Edges();
     dragging_ = false;
+    resizeEdges_ = Qt::Edges();
+    if (changed) {
+        updateHoverCursor(event->position().toPoint());
+        saveGeometryToSettings();
+    }
     QWidget::mouseReleaseEvent(event);
+}
+
+void CaptionOverlay::leaveEvent(QEvent *event) {
+    if (!dragging_ && resizeEdges_ == Qt::Edges()) unsetCursor();
+    QWidget::leaveEvent(event);
+}
+
+void CaptionOverlay::hideEvent(QHideEvent *event) {
+    saveGeometryToSettings();
+    QWidget::hideEvent(event);
+}
+
+void CaptionOverlay::saveGeometryToSettings() {
+    if (!app_ || !app_->settings()) return;
+    // The strip is frameless, so this is the only place its size can come
+    // from: the user drags it to the size their video needs.
+    app_->settings()->subtitlesGeometry = saveGeometry();
+    app_->settings()->save();
 }
 
 } // namespace VoicePanel

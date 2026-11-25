@@ -1,7 +1,7 @@
 """Final-transcript quality for the long meeting/caption runs, and the offline
 re-pass that a saved recording can get after the call.
 
-Three steps, one file:
+Four steps, one file:
 
   reference  Turn a word-level annotation of a looped fixture into one reference
              transcript on the fixture's own timeline.
@@ -11,6 +11,9 @@ Three steps, one file:
              turn, clean the paragraphs with the text model (meeting notes and
              the context document as context), write a Markdown transcript with
              names, then score it next to the live run.
+  diagnose   Explain a live report instead of restating it: each empty phrase's
+             length, loudness, voices and distance to a turn change, and each
+             lost turn's cause (never cut, empty phrase, partial).
 
 All three use the same models the service already runs; nothing is downloaded.
 The offline pass reads the WAV that the panel kept, so it hears the whole
@@ -26,6 +29,9 @@ Examples (from the repository root, service on 127.0.0.1:8080):
   python tools/bench/transcript_quality.py score \
       --report runtime/reports/subtitles-long/result.json \
       --reference runtime/bench/meeting-3voices-ref.json
+
+  python tools/bench/transcript_quality.py diagnose \
+      --report runtime/reports/subtitles-long/result.json
 
   python tools/bench/transcript_quality.py offline \
       --wav runtime/bench/meeting-3voices-16k.wav \
@@ -366,6 +372,228 @@ def glossary_from_context(path: Path) -> list[str]:
             if term and term.lower() not in {t.lower() for t in terms}:
                 terms.append(term)
     return terms
+
+
+# --------------------------------------------------------------- diagnosis
+def percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, max(0, int(round(fraction * (len(ordered) - 1)))))]
+
+
+def loudness(pcm: array, rate: int, start: float, end: float) -> tuple[float, float]:
+    """RMS and peak of a span, in the file's own sample units."""
+    begin, finish = max(0, int(start * rate)), min(len(pcm), int(end * rate))
+    if finish <= begin:
+        return 0.0, 0.0
+    block = pcm[begin:finish]
+    return math.sqrt(sum(v * v for v in block) / len(block)), max(abs(v) for v in block)
+
+
+def recurring(rows: list[dict[str, Any]], period: float | None) -> dict[str, Any]:
+    """Losses at the same offset in a looped fixture are one fault, not many.
+
+    The acceptance fixture is a short human-annotated clip repeated to ten
+    minutes, so a phrase the run always misses appears once per loop at the same
+    offset. Counting the offsets says whether the work is one reproducible
+    failure or a general weakness of the live path.
+    """
+    if not period or not rows:
+        return {"period_s": period, "events": len(rows), "positions": None}
+    buckets: dict[float, int] = defaultdict(int)
+    for row in rows:
+        buckets[round(row["start"] % period, 1)] += 1
+    positions = sorted(buckets.items(), key=lambda item: -item[1])
+    return {"period_s": round(period, 1), "events": len(rows), "positions": len(positions),
+            "repeated": [{"offset_s": offset, "events": count} for offset, count in positions]}
+
+
+def phrase_facts(seg: dict[str, Any], ref: list[dict[str, Any]],
+                 pcm: array | None, rate: int) -> dict[str, Any]:
+    """What a phrase spans, in terms the human annotation understands."""
+    covering = [t for t in ref if segment_overlap(seg, t) > 0.05]
+    rms, peak = loudness(pcm, rate, seg["start"], seg["end"]) if pcm else (None, None)
+    return {"start": round(seg["start"], 2), "end": round(seg["end"], 2),
+            "seconds": round(seg["end"] - seg["start"], 2),
+            "speaker": seg.get("speaker", ""),
+            "rms": round(rms, 1) if rms is not None else None, "peak": peak,
+            "human_words": sum(len(words(t["text"])) for t in covering),
+            "speech_s": round(sum(segment_overlap(seg, t) for t in covering), 2),
+            "voices": len({t["speaker"] for t in covering}),
+            # A phrase that starts on a human turn start is a fragment of that
+            # boundary, not speech from the middle of a turn.
+            "to_turn_start": round(min((abs(seg["start"] - t["start"]) for t in ref),
+                                       default=99.0), 2)}
+
+
+def shape(rows: list[dict[str, Any]], boundary_s: float) -> dict[str, Any]:
+    """How the empty phrases compare with the ones that carried words."""
+    if not rows:
+        return {"phrases": 0}
+    lengths = [r["seconds"] for r in rows]
+    levels = [r["rms"] for r in rows if r["rms"] is not None]
+    return {"phrases": len(rows),
+            "median_seconds": round(percentile(lengths, 0.5), 2),
+            "median_rms": round(percentile(levels, 0.5), 1) if levels else None,
+            "median_voices": percentile([float(r["voices"]) for r in rows], 0.5),
+            "short_share": round(sum(1 for v in lengths if v < boundary_s) / len(rows), 3),
+            "on_turn_start_share": round(
+                sum(1 for r in rows if r["to_turn_start"] <= 0.3) / len(rows), 3)}
+
+
+def diagnose(hyp: list[dict[str, Any]], ref: list[dict[str, Any]],
+             pcm: array | None = None, rate: int = 16000,
+             weak_ratio: float = 0.25, threshold: float = LOST_TURN_RECALL,
+             period: float | None = None, boundary_s: float = 1.6) -> dict[str, Any]:
+    """Why the live run came back empty and which turns it lost.
+
+    The acceptance numbers say how many phrases were empty and how many human
+    turns were lost; they do not say what to fix. Each empty phrase is described
+    by what it actually spans: its length, its loudness against the captions
+    that did carry words, how many human voices are inside it, how many words
+    the annotation puts there and how close it starts to a turn change. Each
+    lost turn is charged to one of three causes, which are different pieces of
+    work:
+
+      not_cut       no phrase overlaps the turn at all: the VAD never cut it
+      empty_phrase  every overlapping phrase came back without words
+      partial       overlapping phrases carried some words, under the threshold
+    """
+    facts = [phrase_facts(seg, ref, pcm, rate) for seg in hyp]
+    # Speech loudness is judged against the captions that did carry words, so
+    # the split does not depend on a fixed level for this particular fixture.
+    voiced = [row["rms"] for seg, row in zip(hyp, facts)
+              if str(seg.get("text", "")).strip() and row["rms"] is not None]
+    weak_level = weak_ratio * percentile(voiced, 0.5) if voiced else 0.0
+
+    empty_rows: list[dict[str, Any]] = []
+    caught: list[dict[str, Any]] = []
+    speech_lost = 0.0
+    for seg, row in zip(hyp, facts):
+        if str(seg.get("text", "")).strip():
+            caught.append(row)
+            continue
+        speech_lost += row["speech_s"]
+        if row["rms"] is not None and voiced and row["rms"] < weak_level:
+            cause = "quiet"            # the VAD cut something the room did not put words on
+        elif row["human_words"] == 0:
+            cause = "no_speech"        # loud audio, but the annotation hears no words in it
+        elif row["to_turn_start"] <= 0.3 and row["seconds"] < boundary_s:
+            cause = "boundary"         # a short fragment where one turn hands over to the next
+        elif row["seconds"] < 0.5:
+            cause = "sliver"           # too little audio for the model to say anything
+        else:
+            cause = "lost_speech"      # speech reached the model and it said nothing
+        empty_rows.append({**row, "cause": cause})
+
+    lost_rows: list[dict[str, Any]] = []
+    by_cause: Counter = Counter()
+    by_person: dict[str, Counter] = defaultdict(Counter)
+    checked = 0
+    for turn in ref:
+        turn_words = words(turn["text"])
+        if len(turn_words) < 3 or turn["end"] - turn["start"] < 0.8:
+            continue
+        checked += 1
+        covering = [s for s in hyp if segment_overlap(s, turn) > 0]
+        heard: Counter = Counter()
+        for seg in covering:
+            if str(seg.get("text", "")).strip():
+                heard.update(words(seg["text"]))
+        kept = sum(min(count, heard[word]) for word, count in Counter(turn_words).items())
+        if kept >= threshold * len(turn_words):
+            continue
+        if not covering:
+            cause = "not_cut"
+        elif not heard:
+            cause = "empty_phrase"
+        else:
+            cause = "partial"
+        by_cause[cause] += 1
+        by_person[turn["speaker"]][cause] += 1
+        lost_rows.append({"start": round(turn["start"], 2), "end": round(turn["end"], 2),
+                          "speaker": turn["speaker"], "words": len(turn_words),
+                          "kept": kept, "seconds": round(turn["end"] - turn["start"], 2),
+                          "covering_phrases": len(covering), "cause": cause,
+                          "said": turn["text"][:120]})
+
+    empty_causes = Counter(row["cause"] for row in empty_rows)
+    return {
+        "reference": {"turns": len(ref), "checked_turns": checked,
+                      "words": sum(len(words(t["text"])) for t in ref)},
+        "empty_phrases": {
+            "total": len(hyp), "empty": len(empty_rows),
+            "share": round(len(empty_rows) / len(hyp), 3) if hyp else None,
+            "by_cause": dict(empty_causes),
+            "speech_seconds_under_empty": round(speech_lost, 1),
+            "weak_level": round(weak_level, 1) if pcm and voiced else None,
+            "shape": {"empty": shape(empty_rows, boundary_s),
+                      "captioned": shape(caught, boundary_s)},
+            "examples": sorted(empty_rows, key=lambda r: -r["human_words"])[:10],
+            "all": empty_rows,
+        },
+        "lost_turns": {
+            "checked": checked, "lost": len(lost_rows), "by_cause": dict(by_cause),
+            "share": round(len(lost_rows) / checked, 3) if checked else None,
+            "by_person": {person: dict(counts) for person, counts in by_person.items()},
+            "examples": sorted(lost_rows, key=lambda r: -r["words"])[:10],
+            "all": lost_rows,
+        },
+        "recurring": {"empty_phrases": recurring(empty_rows, period),
+                      "lost_turns": recurring(lost_rows, period)},
+    }
+
+
+def write_diagnosis_markdown(path: Path, result: dict[str, Any], report: str) -> None:
+    empty, lost = result["empty_phrases"], result["lost_turns"]
+    lines = ["# Caption loss diagnosis", "", f"Report: `{report}`", "",
+             "## Empty phrases", "",
+             f"{empty['empty']} of {empty['total']} phrases came back without words "
+             f"({empty['share']}); {empty['speech_seconds_under_empty']} s of human speech lay under them.",
+             "", "| cause | phrases | meaning |", "| --- | --- | --- |",
+             "| quiet | {} | cut on audio the room did not put words on |".format(empty["by_cause"].get("quiet", 0)),
+             "| no_speech | {} | audio under it holds no human turn |".format(empty["by_cause"].get("no_speech", 0)),
+             "| boundary | {} | a short fragment where one turn hands over to the next |".format(empty["by_cause"].get("boundary", 0)),
+             "| sliver | {} | shorter than 0.5 s inside a turn |".format(empty["by_cause"].get("sliver", 0)),
+             "| lost_speech | {} | speech reached the model and it said nothing |".format(empty["by_cause"].get("lost_speech", 0)),
+             "", "### Shape of the empty phrases", "",
+             "| | empty | captioned |", "| --- | --- | --- |"]
+    for key, title in (("median_seconds", "median length, s"), ("median_rms", "median loudness"),
+                       ("median_voices", "median human voices inside"),
+                       ("short_share", "share shorter than 1.6 s"),
+                       ("on_turn_start_share", "share starting on a turn change")):
+        left = empty["shape"]["empty"].get(key)
+        right = empty["shape"]["captioned"].get(key)
+        lines.append(f"| {title} | {left} | {right} |")
+    lines += [
+             "", "## Lost turns", "",
+             f"{lost['lost']} of {lost['checked']} checked turns were lost ({lost['share']}).", "",
+             "| cause | turns | meaning |", "| --- | --- | --- |",
+             "| not_cut | {} | no phrase overlapped the turn |".format(lost["by_cause"].get("not_cut", 0)),
+             "| empty_phrase | {} | every phrase over it came back empty |".format(lost["by_cause"].get("empty_phrase", 0)),
+             "| partial | {} | some words came back, under half of them |".format(lost["by_cause"].get("partial", 0)),
+             "", "### By person", "", "| person | not_cut | empty_phrase | partial |", "| --- | --- | --- | --- |"]
+    for person, counts in sorted(lost["by_person"].items()):
+        lines.append(f"| {person} | {counts.get('not_cut', 0)} | {counts.get('empty_phrase', 0)} "
+                     f"| {counts.get('partial', 0)} |")
+    lines += ["", "### Lost turns, longest first", "",
+              "| at | person | words kept | cause | said |", "| --- | --- | --- | --- | --- |"]
+    for row in lost["examples"]:
+        lines.append(f"| {clock(row['start'])} | {row['speaker']} | {row['kept']}/{row['words']} "
+                     f"| {row['cause']} | {row['said'].replace('|', '/')} |")
+    lines += ["", "## Repetition", ""]
+    for name, block in result["recurring"].items():
+        positions = block.get("positions")
+        if positions is None:
+            lines.append(f"{name.replace('_', ' ')}: no fixture period known, repetition not checked.")
+            continue
+        lines.append(f"{name.replace('_', ' ')}: {block['events']} events at {positions} "
+                     f"distinct offsets in the {block['period_s']} s loop.")
+        if block.get("repeated"):
+            worst = block["repeated"][0]
+            lines.append(f"  most repeated: {worst['events']} of them at {worst['offset_s']} s.")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ------------------------------------------------------------------ offline
@@ -757,6 +985,49 @@ def command_offline(args) -> int:
     return 0
 
 
+def command_diagnose(args) -> int:
+    report_path = Path(args.report)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    hyp = live_segments(report)
+    if not hyp:
+        raise SystemExit(f"{args.report} has no per-phrase timings; rerun the caption acceptance")
+    reference = load_reference(Path(args.reference))
+    ref = reference["segments"]
+    pcm = rate = None
+    wav = Path(args.wav)
+    if wav.is_file():
+        pcm, rate = read_wav(wav)
+    else:
+        print(f"note: {wav} missing, causes are decided without audio loudness")
+    result = diagnose(hyp, ref, pcm, rate, args.weak_ratio, period=reference.get("period_s"),
+                      boundary_s=args.boundary_s)
+    result["source"] = {"report": str(report_path), "reference": str(args.reference),
+                        "wav": str(wav) if pcm else None}
+    out_dir = Path(args.out or report_path.parent)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "diagnosis.json").write_text(json.dumps(result, indent=2, ensure_ascii=False),
+                                            encoding="utf-8")
+    write_diagnosis_markdown(out_dir / "diagnosis.md", result, str(report_path))
+    empty, lost = result["empty_phrases"], result["lost_turns"]
+    print_table([("empty phrases", f"{empty['empty']} of {empty['total']} ({empty['share']})",
+                  empty["by_cause"]),
+                 ("speech under empty", f"{empty['speech_seconds_under_empty']} s"),
+                 ("lost turns", f"{lost['lost']} of {lost['checked']} ({lost['share']})",
+                  lost["by_cause"])])
+    for name, block in result["recurring"].items():
+        if block.get("positions") is not None:
+            print(f"  {name}: {block['events']} events at {block['positions']} distinct offsets "
+                  f"in the {block['period_s']} s loop")
+    both = result["empty_phrases"]["shape"]
+    if both["empty"].get("phrases"):
+        print(f"  empty phrases median {both['empty']['median_seconds']} s vs captioned "
+              f"{both['captioned'].get('median_seconds')} s; "
+              f"{both['empty']['on_turn_start_share']:.0%} of them start on a turn change "
+              f"against {both['captioned'].get('on_turn_start_share'):.0%} of the captioned ones")
+    print(f"diagnosis: {out_dir / 'diagnosis.md'}\nnumbers: {out_dir / 'diagnosis.json'}")
+    return 0
+
+
 def print_table(rows: list[tuple]) -> None:
     for row in rows:
         print("  " + "  ".join(str(v) for v in row))
@@ -807,6 +1078,17 @@ def main() -> int:
     off.add_argument("--names", default=None, help='speaker labels: "SPEAKER_00=Лёша,SPEAKER_01=Женя"')
     off.add_argument("--paragraph-chars", type=int, default=900)
     off.set_defaults(func=command_offline)
+
+    dgn = sub.add_parser("diagnose", help="explain empty phrases and lost turns of a live report")
+    dgn.add_argument("--report", default=str(DEFAULT_LIVE))
+    dgn.add_argument("--reference", default=str(DEFAULT_REFERENCE))
+    dgn.add_argument("--wav", default=str(ROOT / "runtime" / "bench" / "meeting-3voices-16k.wav"))
+    dgn.add_argument("--out", default=None, help="directory for diagnosis.json and diagnosis.md")
+    dgn.add_argument("--weak-ratio", type=float, default=0.25,
+                     help="RMS below this share of the median captioned phrase reads as quiet")
+    dgn.add_argument("--boundary-s", type=float, default=1.6,
+                     help="a phrase shorter than this that starts on a turn change is a boundary fragment")
+    dgn.set_defaults(func=command_diagnose)
 
     args = parser.parse_args()
     if getattr(args, "language", None) == "auto":
