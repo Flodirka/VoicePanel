@@ -219,7 +219,8 @@ private:
     // acceptance run; the fragment keeps no caption.
     QVector<float> mergeAudio_;
     double mergeAt_ = 0.0;
-    int mergedPhrases_ = 0;
+    int mergedPhrases_ = 0;   // fragments actually folded into a later phrase
+    int mergePending_ = 0;    // fragments held, not yet folded
     // Phrase identity for captions and their labels. The overlay shows the
     // words at once; the label follows when the diariser answers, so the two
     // are matched by id rather than by being the newest line on screen.

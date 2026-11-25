@@ -133,6 +133,7 @@ bool SessionController::start(const QString &vadModelPath) {
     mergeAudio_.clear();
     mergeAt_ = 0.0;
     mergedPhrases_ = 0;
+    mergePending_ = 0;
     ++generation_;
 
     mic_->setVadModel(vadModelPath);
@@ -180,6 +181,7 @@ void SessionController::stop() {
     coveredEnd_ = 0.0;
     mergeAudio_.clear();
     mergeAt_ = 0.0;
+    mergePending_ = 0;
     if (tts_) tts_->stop();
     emit status(tr("Stopped"));
 }
@@ -203,6 +205,8 @@ void SessionController::onUtterance(bool incoming, const QVector<float> &samples
         combined.resize(combined.size() + gap, 0.0f);
         combined += samples;
         const double start = mergeAt_;
+        mergedPhrases_ += mergePending_;
+        mergePending_ = 0;
         mergeAudio_.clear();
         mergeAt_ = 0.0;
         remoteQueue_.append(Job{combined, true, start, ++nextPhraseId_});
@@ -306,7 +310,7 @@ void SessionController::finishCurrent(const QString &text) {
             if (double(total) / 16000.0 <= 3.0) {
                 mergeAudio_.resize(mergeAudio_.size() + gap, 0.0f);
                 mergeAudio_ += job.samples;
-                ++mergedPhrases_;
+                ++mergePending_;
             }
             // The phrase was put on the timeline when it was submitted. It is
             // held now, so the timeline ends where it begins and the merged
