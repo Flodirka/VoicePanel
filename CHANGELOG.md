@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 - 2026-11-25
+
+- Fold an empty subtitle phrase into the next caption instead of giving it a line of its own. The fragment's audio is held and recognised with the next phrase (bounded to 3 s), so two empties in a row reach the recogniser as one request and a fragment at the end of a session is dropped. No extra request is made.
+- Measured on the 600-second three-voice fixture: WER 0.303 → 0.285, lost turns 20.6 % → 14.4 %, term recall 79.5 % → 82.1 %, speaker names 92.3 % → 94.0–95.7 %, empty lines 20 → 0, caption order 0/0, median latency 186 → 186 ms.
+- Cover the merge model-free: two empty phrases in a row plus a fragment at the end of the session, checking the folded audio, the counters, and that the trailing fragment never becomes a caption.
+
+See [release notes and known limitations](docs/releases/0.3.2.md).
+
 ## 0.3.1 - 2026-11-25
 
 - Show a subtitle line as soon as its words are known. The rolling diarisation window answers seconds later, so its label corrects that phrase by id instead of holding the text; until then the line carries the last resolved label.
