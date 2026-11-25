@@ -126,7 +126,7 @@ the existing 945 MB weights and one loaded model across voice and language
 changes. These are sample measurements, not peak-memory or call-quality guarantees.
 Earlier model-table measurements remain in [Models](docs/models.md).
 
-Version 0.3.0 names the speaker in captioned application audio and scores the caption run on the final transcript instead of only on labels and latency. It also carries 0.2.0's continuous-capture recovery and engine updates. See [release notes and known limitations](docs/releases/0.3.0.md).
+Version 0.3.1 shows subtitle text without waiting for the speaker label: the rolling diarisation window corrects that phrase by id when it answers. Speaker identity survives engine catch-up, a single-voice acceptance run checks that the window does not invent participants, `diagnose` explains empty phrases and lost turns, and a recognition `prompt` now reaches `verbose_json` as well. See [release notes and known limitations](docs/releases/0.3.1.md).
 
 Voice design controls appear for supported models in Settings and Voice
 playback. The API reports the accepted attributes and generation options per
