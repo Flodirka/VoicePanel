@@ -217,10 +217,13 @@ private:
     // no words for is held and recognised with the next phrase, so the fragment
     // never becomes a line of its own. `mergedPhrases_` is read by the
     // acceptance run; the fragment keeps no caption.
-    QVector<float> mergeAudio_;
-    double mergeAt_ = 0.0;
-    int mergedPhrases_ = 0;   // fragments actually folded into a later phrase
-    int mergePending_ = 0;    // fragments held, not yet folded
+    // The longest utterance one recognition may carry once a phrase is held;
+    // past it the fragment is dropped instead of sending an unbounded request.
+    static constexpr double kMergeLimitSeconds = 3.0;
+    QVector<float> mergeAudio_;   // held fragments, the silence between them included
+    double mergeAt_ = 0.0;        // where mergeAudio_ starts on the session clock
+    int mergedPhrases_ = 0;       // fragments actually folded into a later phrase
+    int mergePending_ = 0;        // fragments held, not yet folded
     // Phrase identity for captions and their labels. The overlay shows the
     // words at once; the label follows when the diariser answers, so the two
     // are matched by id rather than by being the newest line on screen.

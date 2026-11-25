@@ -18,10 +18,14 @@ Prepare the dependencies in [Getting started](getting-started.md), then run from
 
 ```powershell
 .\tools\build_panel.ps1
-ctest --test-dir panel/build --output-on-failure
+.\tools\run_panel_tests.ps1
 ```
 
-Headless tests skip native microphone and desktop input checks. For native coverage, add your Qt `bin` directory to PATH, set `QT_QPA_PLATFORM_PLUGIN_PATH` to its `plugins/platforms` directory, and run `panel/build/bin/VoicePanelTests.exe -platform windows` from `panel/build`. The test preferences use temporary storage.
+The runner puts the suite under a hard budget instead of letting it compete with the desktop: one process at a time (a second run is refused), one logical core (`-MaxCores`), below-normal priority (`-Priority`), a memory cap enforced by a Job Object (`-MemoryLimitMB`, default 768), a wall-clock timeout (`-TimeoutSeconds`) and a per-test timeout (`-FunctionTimeoutSeconds`, exported as `QTEST_FUNCTION_TIMEOUT`). A full run therefore takes longer than the raw executable; it prints the peak working set and CPU time next to the QtTest totals, so the budget can be checked against what the panel itself uses. If a run dies at the cap, raise `-MemoryLimitMB` and record the new peak; do not drop the cap.
+
+`-Filter <name>` runs named tests only, `-LogPath` moves the report (default `runtime/logs/panel-tests.txt`), and `-Native` switches from the offscreen platform to the windows one for desktop checks. `-SelfTest` proves the cap is real: a 512 MB allocation must fail inside a 128 MB job. `ctest --test-dir panel/build --output-on-failure` remains available for the quick offscreen pass, but it has no memory or CPU cap.
+
+Headless tests skip native microphone and desktop input checks. For native coverage the runner's `-Native` flag adds the platform; the test preferences use temporary storage.
 
 ## Manual desktop acceptance
 
@@ -53,14 +57,15 @@ The panel's opt-in inference test needs a local `live-fixture.wav` in `panel/bui
 The long meeting and caption acceptance runs replay local fixtures against a running service. From the repository root, with the service on its default address:
 
 ```powershell
-$env:QTEST_FUNCTION_TIMEOUT = 1200000
 $env:VOICEPANEL_MEETING_BENCH = "http://127.0.0.1:8080"
-.\panel\build\bin\VoicePanelTests.exe -o runtime\logs\meeting-long.txt,txt meetingLongRecordingKeepsSpeakersAndLatency
+.\tools\run_panel_tests.ps1 -Filter meetingLongRecordingKeepsSpeakersAndLatency `
+  -TimeoutSeconds 3600 -FunctionTimeoutSeconds 1200 -LogPath runtime\logs\meeting-long.txt
 $env:VOICEPANEL_SUBTITLES_BENCH = "http://127.0.0.1:8080"
-.\panel\build\bin\VoicePanelTests.exe -o runtime\logs\subtitles-long.txt,txt subtitlesLongRecordingKeepsSpeakersAndLatency
+.\tools\run_panel_tests.ps1 -Filter subtitlesLongRecordingKeepsSpeakersAndLatency `
+  -TimeoutSeconds 3600 -FunctionTimeoutSeconds 1200 -LogPath runtime\logs\subtitles-long.txt
 ```
 
-They need `runtime/bench/meeting-long-16k.wav` and `runtime/bench/meeting-3voices-16k.wav` and take several minutes each. Each writes its per-phrase report under `runtime/reports/`. Without the fixture or the variable the test is skipped, not passed.
+Run the service at below-normal priority too (`(Start-Process python -ArgumentList 'tools\run_service.py','--config','config.yaml' -PassThru).PriorityClass = 'BelowNormal'`), so the acceptance does not compete with the desktop either. They need `runtime/bench/meeting-long-16k.wav` and `runtime/bench/meeting-3voices-16k.wav` and take several minutes each. Each writes its per-phrase report under `runtime/reports/`. Without the fixture or the variable the test is skipped, not passed.
 
 The caption run first diarises the whole fixture in one request and uses that as the acceptance reference. Every phrase is then scored against the voice the reference says is speaking; the test fails unless the three voices land on three distinct labels, each voice keeps its label on at least 80 % of its captioned phrases, no label first appears after the first third, and per-phrase latency does not grow. `runtime/reports/subtitles-long/result.json` records the voice-to-label counts next to the per-phrase timings.
 

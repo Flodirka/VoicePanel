@@ -83,6 +83,6 @@ if ($IsWindows -or $env:OS -eq 'Windows_NT') {
     }
 }
 if (-not (Test-Path $ctest)) { $ctest = "ctest" }
-Write-Host "run the panel tests with: $ctest --test-dir $build --output-on-failure"
+Write-Host "run the panel tests with: powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_panel_tests.ps1"
 
 Write-Host "panel built: $(Join-Path $binDir 'VoicePanel.exe')"
