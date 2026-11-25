@@ -213,6 +213,13 @@ private:
     // line is visible, and the translation takes a few hundred milliseconds.
     QList<TranslationJob> translationQueue_;
     bool translating_ = false;
+    // T-1 merge (experiment): audio of a remote phrase the recogniser returned
+    // no words for is held and recognised with the next phrase, so the fragment
+    // never becomes a line of its own. `mergedPhrases_` is read by the
+    // acceptance run; the fragment keeps no caption.
+    QVector<float> mergeAudio_;
+    double mergeAt_ = 0.0;
+    int mergedPhrases_ = 0;
     // Phrase identity for captions and their labels. The overlay shows the
     // words at once; the label follows when the diariser answers, so the two
     // are matched by id rather than by being the newest line on screen.

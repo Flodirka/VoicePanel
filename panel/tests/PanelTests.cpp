@@ -3162,6 +3162,12 @@ private slots:
             if (emitted[i] && !heardText[i].isEmpty()) ++captioned;
         const int emptyCaptions = int(labels.size()) - captioned;
         const double emptyShare = labels.isEmpty() ? 0.0 : double(emptyCaptions) / labels.size();
+        // Merge experiment: phrases whose audio was folded into the next
+        // caption instead of getting a line of their own. They still count as
+        // phrases without words of their own; `without_line` is what a reader
+        // would see as a gap.
+        const int merged = control.mergedPhrases_;
+        const int emptyWithoutLine = qMax(0, emptyCaptions - merged);
 
         // Names: the best one-to-one mapping of live labels onto the people in
         // the human transcript, then the share of captioned phrases that label
@@ -3242,6 +3248,8 @@ private slots:
                                   {"speech_covered", coverage},
                                   {"empty_captions", QJsonObject{{"segments", qint64(labels.size())},
                                                                  {"empty", emptyCaptions},
+                                                                 {"merged", merged},
+                                                                 {"without_line", emptyWithoutLine},
                                                                  {"share", emptyShare}}},
                                   {"speaker_names", QJsonObject{{"accuracy", nameAccuracy},
                                                                  {"captioned", captioned}}},
@@ -3319,10 +3327,11 @@ private slots:
               unlabeled, steady, lastThird, deferred, outOfOrder,
               qPrintable(voiceLines.join(", ")));
         qInfo("quality: WER %.3f CER %.3f, speech covered %.1f%%, lost turns %.1f%% "
-              "(%d of %d, %.1f%% of their words missing), empty captions %.1f%%, "
+              "(%d of %d, %.1f%% of their words missing), empty captions %.1f%% "
+              "(%d folded into the next phrase, %d without a line), "
               "names %.1f%%, terms %.1f%% (%lld of %lld)",
               werValue, cerValue, coverage * 100.0, lostShare * 100.0, turnsLost, turnsChecked,
-              missingWordShare * 100.0, emptyShare * 100.0,
+              missingWordShare * 100.0, emptyShare * 100.0, merged, emptyWithoutLine,
               nameAccuracy * 100.0, termAccuracy * 100.0, qint64(termsKept), qint64(terms.size()));
         QVERIFY2(failures.isEmpty(), qPrintable(failures.join("; ").left(300)));
         for (const VoiceScore &score : scores) {

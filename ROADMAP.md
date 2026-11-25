@@ -200,6 +200,24 @@ that variant at WER 0.269 with empty 7.9 % of 127 phrases. It needs a caption
 merge/drop API in the overlay and the window, which is a design decision, not a
 tweak.
 
+**Measured (2026-11-25, live path, branch `experiment/t1-merge`):** the merge is
+a forward fold. An empty remote phrase keeps its audio, the next phrase is
+recognised with it prepended (bounded to 3 s), and the fragment never becomes a
+line; no extra request is made. Two runs on the 600 s fixture:
+
+| run | empty | folded | without a line | lost | WER | names | terms | steady → last | order |
+|-----|-------|--------|----------------|------|-----|-------|-------|---------------|-------|
+| 1 | 14.6 % (20/137) | 20 | 0 | 14.4 % (14/97) | 0.285 | 95.7 % | 82.1 % | 186 → 186 ms | 0 / 0 |
+| 2 | 14.6 % (20/137) | 20 | 0 | 14.4 % (14/97) | 0.285 | 94.0 % | 82.1 % | 186 → 187 ms | 0 / 0 |
+
+Against the baseline (lost 20.6 %, WER 0.303, names 92.3 %, terms 79.5 %):
+lost turns −6.2 points, WER −0.018, terms +2.6 points, names +1.7–3.4 points,
+with no extra requests and no latency change. The per-phrase empty share does
+not move — the fragment still has no words of its own — but all 20 are folded
+into the next caption, so the card has no empty line. The empty gate as written
+(≤7 % of segments) counts phrases, not visible gaps; that definition needs a
+decision before the merge can be called done.
+
 *How to unblock (S-2 and alternatives, in the order worth trying):*
 
 1. **Per-turn recognition in the live path: done, and it has no words to
