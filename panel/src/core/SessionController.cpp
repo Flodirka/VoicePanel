@@ -130,6 +130,9 @@ bool SessionController::start(const QString &vadModelPath) {
     diarizing_ = false;
     coveredEnd_ = 0.0;
     nextPhraseId_ = 0;
+    mergeAudio_.clear();
+    mergeAt_ = 0.0;
+    mergedPhrases_ = 0;
     ++generation_;
 
     mic_->setVadModel(vadModelPath);
@@ -175,6 +178,8 @@ void SessionController::stop() {
     lastSpeakerLabel_.clear();
     diarizing_ = false;
     coveredEnd_ = 0.0;
+    mergeAudio_.clear();
+    mergeAt_ = 0.0;
     if (tts_) tts_->stop();
     emit status(tr("Stopped"));
 }
@@ -187,6 +192,22 @@ void SessionController::onUtterance(bool incoming, const QVector<float> &samples
         if (lastRemoteVoiceMs_ > 0 && now - lastRemoteVoiceMs_ < 1200) {
             return;   // the microphone is hearing the speakers, not the user
         }
+    }
+    if (incoming && mode_ == Mode::Subtitles && !mergeAudio_.isEmpty()) {
+        // The held fragment and this phrase are one utterance for the
+        // recogniser; the caption belongs to this phrase and starts at the
+        // fragment, so its words and its label cover the merged span.
+        QVector<float> combined = mergeAudio_;
+        const double expected = mergeAt_ + double(combined.size()) / 16000.0;
+        const int gap = qMax(0, int((at - expected) * 16000.0));
+        combined.resize(combined.size() + gap, 0.0f);
+        combined += samples;
+        const double start = mergeAt_;
+        mergeAudio_.clear();
+        mergeAt_ = 0.0;
+        remoteQueue_.append(Job{combined, true, start, ++nextPhraseId_});
+        pump();
+        return;
     }
     (incoming ? remoteQueue_ : micQueue_).append(Job{samples, incoming, at, ++nextPhraseId_});
     pump();
@@ -274,6 +295,27 @@ void SessionController::finishCurrent(const QString &text) {
     const Job job = current_;
     hasCurrent_ = false;
     if (text.isEmpty()) {
+        // T-1 merge: the phrase is the tail of a word the previous caption
+        // already carries, or the start of the next reply. Hold its audio and
+        // recognise it with the next phrase instead of giving it a line.
+        if (mode_ == Mode::Subtitles && job.incoming && !job.samples.isEmpty()) {
+            if (mergeAudio_.isEmpty()) mergeAt_ = job.at;
+            const double expected = mergeAt_ + double(mergeAudio_.size()) / 16000.0;
+            const int gap = qMax(0, int((job.at - expected) * 16000.0));
+            const int total = mergeAudio_.size() + gap + job.samples.size();
+            if (double(total) / 16000.0 <= 3.0) {
+                mergeAudio_.resize(mergeAudio_.size() + gap, 0.0f);
+                mergeAudio_ += job.samples;
+                ++mergedPhrases_;
+            }
+            // The phrase was put on the timeline when it was submitted. It is
+            // held now, so the timeline ends where it begins and the merged
+            // phrase appends there instead of duplicating the fragment.
+            if (remoteTimeline_.size() >= job.samples.size())
+                remoteTimeline_.resize(remoteTimeline_.size() - job.samples.size());
+            coveredEnd_ = qMin(coveredEnd_,
+                               timelineStartAt_ + double(remoteTimeline_.size()) / 16000.0);
+        }
         busy_ = false;
         pump();
         return;
