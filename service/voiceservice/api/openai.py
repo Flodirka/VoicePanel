@@ -93,7 +93,7 @@ async def transcriptions(
             async with lock:
                 if response_format == "verbose_json":
                     result = await registry.audiocpp.transcribe_detailed(
-                        wav, model=model_id, language=language
+                        wav, model=model_id, language=language, prompt=prompt
                     )
                 else:
                     result = await registry.audiocpp.transcribe(

@@ -179,13 +179,27 @@ class AudioCppBackend:
             return resp.json()
 
     async def transcribe_detailed(
-        self, wav_bytes: bytes, *, model: str, language: str | None = None, timeout: float = 300.0
+        self,
+        wav_bytes: bytes,
+        *,
+        model: str,
+        language: str | None = None,
+        prompt: str | None = None,
+        timeout: float = 300.0,
     ) -> dict[str, Any]:
-        """Word-level detail variant when the model family supports it."""
+        """Word-level detail variant when the model family supports it.
+
+        The prompt is carried here too: the detail variant used to take no
+        prompt at all, so a verbose_json request silently lost its recognition
+        context while the plain one kept it — the caller could not tell from
+        the answer that the glossary had been dropped.
+        """
         async with self.proc.lease():
             data = {"model": model}
             if language and self.supports_language(model):
                 data["language"] = language
+            if prompt:
+                data["prompt"] = prompt
             resp = await _post_with_retry(
                 self.proc.http(),
                 f"{self.proc.base_url}/v1/audio/transcriptions/details",
