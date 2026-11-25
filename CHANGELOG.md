@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 - 2026-11-25
+
+- Show a subtitle line as soon as its words are known. The rolling diarisation window answers seconds later, so its label corrects that phrase by id instead of holding the text; until then the line carries the last resolved label.
+- Match a window turn to a known person on the session clock with mutual overlap, and settle the ids left over by elimination. A voice the engine re-cut can no longer mint a second label, and a window that overlaps no labelled speech names nobody.
+- Continue diarisation from the last labelled second in half-window steps when the engine falls behind the audio. Jumping to the newest audio left the speech in between unlabelled.
+- Add a single-voice acceptance run: replay a real one-speaker recording and fail if the rolling window invents a second participant.
+- Explain a report with `transcript_quality.py diagnose`: every empty phrase by length, loudness, voices and distance to a turn change; every lost turn charged to `not_cut`, `empty_phrase` or `partial`; repeated offsets counted once.
+- Keep the recognition `prompt` in `verbose_json` transcriptions. The detail variant used to take none, so a glossary sent with that format was dropped without an error.
+- Remember the subtitles overlay size between sessions.
+- Remove the empty-phrase recovery experiment. It filled 10 of 20 empty phrases with `P`/`Puh.` and only added two requests per empty phrase; with a plausibility gate the run was the baseline (14.6 % empty, 20.6 % lost, WER 0.303). The fragment is the tail of a word whose beginning is already captioned.
+
+See [release notes and known limitations](docs/releases/0.3.1.md).
+
 ## 0.3.0 - 2026-11-21
 
 - Label speakers in the subtitles overlay. Captioned application audio runs through the same rolling diarisation window as a meeting, so captions say who spoke.
