@@ -121,10 +121,9 @@ Bounded: one retry per phrase, no retries in a chain.
 *Where:* `panel/src/core/SessionController.cpp` (the subtitles finish path), with
 the context window taken from `remoteTimeline_`.
 
-*State:* closed as a negative result and **removed from the live path** on
-2026-11-25. The retry produced no real words, only `P`/`Puh.`, and the gated run
-was exactly the baseline; keeping it would have cost two requests per empty
-phrase for nothing. The next attempt is the merge variant described below.
+*State:* closed. The retry was removed from the live path on 2026-11-25: it
+produced no real words, only `P`/`Puh.`, and the gated run was exactly the
+baseline. The merge variant replaced it and ships in 0.3.2 (measurements below).
 Earlier attempts:
 
 - A phrase-level retry with ±1.5 s of neighbour audio and in-span word times
@@ -240,10 +239,11 @@ decision before the merge can be called done.
 `diagnose` output must stop charging the boundary fragments to `boundary`.
 
 *Done when:* empty captions drop by at least half (14.6 % → ≤7 %), lost turns fall
-to ≤14 %, WER does not get worse, and per-phrase latency stays flat. Measured:
-WER (0.303) and latency (186 → 186 ms) met, empty 14.6 % and lost 20.6 % not
-met — the recovery has no words to add on this fixture. Removed; the merge
-variant is the next attempt.
+to ≤14 %, WER does not get worse, and per-phrase latency stays flat. The merge
+meets lost (14.4 %), WER (0.285) and latency (186 → 186 ms); the per-phrase
+empty share stays 14.6 % because the fragment has no words of its own, but no
+empty line reaches the card. Treat the visible gap, not the segment count, as
+the gate.
 
 ### T-2 Previous text as ASR prompt (continuity)
 

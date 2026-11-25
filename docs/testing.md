@@ -66,6 +66,8 @@ The caption run first diarises the whole fixture in one request and uses that as
 
 The opposite direction is checked on one real voice: `singleVoiceRecordingKeepsOneLabel` replays `runtime/bench/single-voice-16k.wav` (a real recording of one person, looped to about 2.5 minutes) and fails if the recording gets more than one label, if more than a fifth of its captions are unlabelled, or if per-phrase latency grows. A fixture with three voices can only prove that people are separated; only a single-speaker recording proves the rolling window does not invent participants. Enable it with `VOICEPANEL_SUBTITLES_SINGLE_BENCH` set to the service URL; its report is `runtime/reports/subtitles-single/result.json`.
 
+The merge is covered without a model: `emptyPhrasesFoldIntoTheNextCaptionAndTrailingFragmentIsDropped` feeds two empty phrases in a row, then a phrase with words, then a fragment at the end of the session through the local test server. It checks that the third request carries all three phrases' audio, that the fragments are counted as folded, and that the trailing fragment is held but never captioned and is cleared on stop.
+
 ### Transcript quality
 
 The same run scores the words against a human transcript. `runtime/bench/meeting-3voices-ref.json` is the AMI `ami_en2002d_2132` word-level annotation looped with the fixture audio (60 s clip, 61.2 s period); build it once with:
