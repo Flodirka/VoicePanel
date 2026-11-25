@@ -140,6 +140,27 @@ private:
         return samples;
     }
 
+    // Samples inside the WAV a multipart request carries, or -1 when the body
+    // holds no RIFF file.
+    static int wavSamplesIn(const QByteArray &body) {
+        const int start = body.indexOf("RIFF");
+        if (start < 0) return -1;
+        const QByteArray wav = body.mid(start);
+        if (wav.size() < 44) return -1;
+        int offset = 12, dataOffset = -1, dataSize = 0;
+        while (offset + 8 <= wav.size()) {
+            const quint32 size = qFromLittleEndian<quint32>(wav.constData() + offset + 4);
+            if (wav.mid(offset, 4) == "data") {
+                dataOffset = offset + 8;
+                dataSize = int(size);
+                break;
+            }
+            offset += 8 + int(size) + (int(size) & 1);
+        }
+        if (dataOffset < 0 || dataOffset + dataSize > wav.size()) return -1;
+        return dataSize / 2;
+    }
+
     static int requestIndex(const TestServer &server, const QString &needle, int from = 0) {
         for (int i = from; i < server.requests.size(); ++i)
             if (server.targets.value(i).contains(needle)) return i;
@@ -1858,6 +1879,63 @@ private slots:
         QCOMPARE(captions.first().at(1).toString(), QString("first phrase"));
         QVERIFY(captions.first().at(2).toString().isEmpty());
         QCOMPARE(server.requests.size(), 1);
+    }
+
+    void emptyPhrasesFoldIntoTheNextCaptionAndTrailingFragmentIsDropped() {
+        // Merge: a remote phrase the recogniser returns no words for is not a
+        // line of its own. Its audio is held and recognised with the next
+        // phrase, so two empties in a row reach the recogniser as one request
+        // carrying all three phrases; a fragment at the end of the session has
+        // no next phrase, is never captioned, and is dropped on stop.
+        TestServer server;
+        ServiceClient client;
+        client.setBaseUrl(server.url());
+        SessionController control(&client, nullptr);
+        Settings settings;
+        settings.subtitlesDisplay = 2;         // transcript only: no translator call
+        settings.meetingDiarize = false;       // this test is about the merge, not labels
+        control.configure(settings, SessionController::Mode::Subtitles);
+        control.running_ = true;
+        QSignalSpy captions(&control, &SessionController::caption);
+
+        const QVector<float> samples(8000, 0.05f);   // 0.5 s each, back to back
+        control.onUtterance(true, samples, 0.0);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 1, 1000);
+        server.reply(0, R"({"text":""})");
+        QTRY_COMPARE_WITH_TIMEOUT(control.mergePending_, 1, 1000);
+        QCOMPARE(captions.size(), 0);
+
+        control.onUtterance(true, samples, 0.5);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 2, 1000);
+        server.reply(1, R"({"text":""})");
+        // The first fragment went into this phrase's request, so the held audio
+        // is one unit carrying both; the first is already counted as folded.
+        QTRY_COMPARE_WITH_TIMEOUT(control.mergePending_, 1, 1000);
+        QCOMPARE(control.mergedPhrases_, 1);
+        QCOMPARE(captions.size(), 0);
+
+        control.onUtterance(true, samples, 1.0);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 3, 1000);
+        // The third request carries the two held fragments and this phrase.
+        QCOMPARE(wavSamplesIn(server.requests[2]->property("body").toByteArray()), 24000);
+        server.reply(2, R"({"text":"third phrase"})");
+        QTRY_COMPARE_WITH_TIMEOUT(captions.size(), 1, 1000);
+        QCOMPARE(captions.first().at(1).toString(), QString("third phrase"));
+        QCOMPARE(control.mergedPhrases_, 2);
+        QCOMPARE(control.mergePending_, 0);
+
+        // A last phrase with no words has nothing to join: it is held, never
+        // captioned, and cleared when the session ends.
+        control.onUtterance(true, samples, 1.5);
+        QTRY_COMPARE_WITH_TIMEOUT(server.requests.size(), 4, 1000);
+        server.reply(3, R"({"text":""})");
+        QTRY_COMPARE_WITH_TIMEOUT(control.mergePending_, 1, 1000);
+        QCOMPARE(captions.size(), 1);
+        QCOMPARE(control.mergedPhrases_, 2);   // held is not folded
+        control.stop();
+        QVERIFY(control.mergeAudio_.isEmpty());
+        QCOMPARE(control.mergePending_, 0);
+        QCOMPARE(server.requests.size(), 4);   // no recovery request
     }
 
     void subtitleRecognitionContinuesWhileTranslationWaits() {
