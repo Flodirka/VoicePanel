@@ -10,7 +10,7 @@ python -m pip install pytest==9.1.1
 python -m pytest tests -q
 ```
 
-These tests use temporary directories, synthetic audio and controlled backend responses. They cover configuration, voice-profile storage, routing, text processing, compute choices, HTTP/WebSocket security, and download integrity and archive extraction.
+These tests use temporary directories, synthetic audio and controlled backend responses. They cover configuration, voice-profile storage, routing, text processing, compute choices, recognition context in every response format, HTTP/WebSocket security, and download integrity and archive extraction.
 
 ## Panel tests
 
@@ -64,6 +64,8 @@ They need `runtime/bench/meeting-long-16k.wav` and `runtime/bench/meeting-3voice
 
 The caption run first diarises the whole fixture in one request and uses that as the acceptance reference. Every phrase is then scored against the voice the reference says is speaking; the test fails unless the three voices land on three distinct labels, each voice keeps its label on at least 80 % of its captioned phrases, no label first appears after the first third, and per-phrase latency does not grow. `runtime/reports/subtitles-long/result.json` records the voice-to-label counts next to the per-phrase timings.
 
+The opposite direction is checked on one real voice: `singleVoiceRecordingKeepsOneLabel` replays `runtime/bench/single-voice-16k.wav` (a real recording of one person, looped to about 2.5 minutes) and fails if the recording gets more than one label, if more than a fifth of its captions are unlabelled, or if per-phrase latency grows. A fixture with three voices can only prove that people are separated; only a single-speaker recording proves the rolling window does not invent participants. Enable it with `VOICEPANEL_SUBTITLES_SINGLE_BENCH` set to the service URL; its report is `runtime/reports/subtitles-single/result.json`.
+
 ### Transcript quality
 
 The same run scores the words against a human transcript. `runtime/bench/meeting-3voices-ref.json` is the AMI `ami_en2002d_2132` word-level annotation looped with the fixture audio (60 s clip, 61.2 s period); build it once with:
@@ -79,6 +81,14 @@ The report's `quality` block carries WER, CER, the share of the room's speech th
 ```powershell
 python tools\bench\transcript_quality.py score --report runtime\reports\subtitles-long\result.json
 ```
+
+`diagnose` explains a report instead of restating it, which is where the next round of work starts. Every empty phrase is described by its length, its loudness against the phrases that did carry words, the human voices inside it and how close it starts to a turn change; every lost turn is charged to `not_cut` (no phrase covered it), `empty_phrase` (the phrases over it came back without words) or `partial` (some words, under half). Because the fixture loops the same 60 s clip, the output also counts distinct offsets, so one reproducible failure is not read as twenty random ones:
+
+```powershell
+python tools\bench\transcript_quality.py diagnose --report runtime\reports\subtitles-long\result.json
+```
+
+It writes `diagnosis.json` and `diagnosis.md` next to the report. The causes are read from the annotation and the saved audio, not from the service, so a report can be diagnosed after the run without the engines loaded.
 
 ### Offline re-pass
 

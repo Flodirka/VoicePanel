@@ -83,6 +83,7 @@ void Settings::load() {
 
     compactGeometry = s.value("compactGeometry").toByteArray();
     editorGeometry = s.value("editorGeometry").toByteArray();
+    subtitlesGeometry = s.value("subtitlesGeometry").toByteArray();
     dockPosition = s.value("dockPosition", dockPosition).toString();
     s.endGroup();
 }
@@ -144,6 +145,7 @@ void Settings::save() const {
 
     s.setValue("compactGeometry", compactGeometry);
     s.setValue("editorGeometry", editorGeometry);
+    s.setValue("subtitlesGeometry", subtitlesGeometry);
     s.setValue("dockPosition", dockPosition);
     s.endGroup();
 }
