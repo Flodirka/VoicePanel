@@ -44,6 +44,17 @@ QString clock(double seconds) {
         .arg(total % 60, 2, 10, QLatin1Char('0'));
 }
 
+// Adds a phrase that was heard at `at` to audio that starts at `start`,
+// keeping the silence between them: a held fragment and the phrase that
+// absorbs it are one utterance on real time.
+void appendPhrase(QVector<float> &audio, double start, const QVector<float> &samples,
+                  double at) {
+    const double expected = start + double(audio.size()) / 16000.0;
+    const int gap = qMax(0, int((at - expected) * 16000.0));
+    audio.resize(audio.size() + gap, 0.0f);
+    audio += samples;
+}
+
 } // namespace
 
 SessionController::SessionController(ServiceClient *service, TtsPlayer *tts, QObject *parent)
@@ -200,10 +211,7 @@ void SessionController::onUtterance(bool incoming, const QVector<float> &samples
         // recogniser; the caption belongs to this phrase and starts at the
         // fragment, so its words and its label cover the merged span.
         QVector<float> combined = mergeAudio_;
-        const double expected = mergeAt_ + double(combined.size()) / 16000.0;
-        const int gap = qMax(0, int((at - expected) * 16000.0));
-        combined.resize(combined.size() + gap, 0.0f);
-        combined += samples;
+        appendPhrase(combined, mergeAt_, samples, at);
         const double start = mergeAt_;
         mergedPhrases_ += mergePending_;
         mergePending_ = 0;
@@ -302,21 +310,19 @@ void SessionController::finishCurrent(const QString &text) {
         // T-1 merge: the phrase is the tail of a word the previous caption
         // already carries, or the start of the next reply. Hold its audio and
         // recognise it with the next phrase instead of giving it a line.
-        if (mode_ == Mode::Subtitles && job.incoming && !job.samples.isEmpty()) {
+        if (mode_ == Mode::Subtitles && job.incoming) {
             if (mergeAudio_.isEmpty()) mergeAt_ = job.at;
-            const double expected = mergeAt_ + double(mergeAudio_.size()) / 16000.0;
-            const int gap = qMax(0, int((job.at - expected) * 16000.0));
-            const int total = mergeAudio_.size() + gap + job.samples.size();
-            if (double(total) / 16000.0 <= 3.0) {
-                mergeAudio_.resize(mergeAudio_.size() + gap, 0.0f);
-                mergeAudio_ += job.samples;
+            QVector<float> held = mergeAudio_;
+            appendPhrase(held, mergeAt_, job.samples, job.at);
+            if (double(held.size()) / 16000.0 <= kMergeLimitSeconds) {
+                mergeAudio_ = held;
                 ++mergePending_;
             }
-            // The phrase was put on the timeline when it was submitted. It is
-            // held now, so the timeline ends where it begins and the merged
-            // phrase appends there instead of duplicating the fragment.
-            if (remoteTimeline_.size() >= job.samples.size())
-                remoteTimeline_.resize(remoteTimeline_.size() - job.samples.size());
+            // The phrase went on the diariser's timeline when it was submitted.
+            // Held, it is not spoken on its own, so the timeline ends where it
+            // begins and the merged phrase appends there instead of duplicating
+            // the fragment.
+            remoteTimeline_.resize(qMax(0, remoteTimeline_.size() - job.samples.size()));
             coveredEnd_ = qMin(coveredEnd_,
                                timelineStartAt_ + double(remoteTimeline_.size()) / 16000.0);
         }
