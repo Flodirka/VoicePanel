@@ -21,7 +21,7 @@ If `service.auth_token` or `VOICE_SERVICE_AUTH_TOKEN` is set, send `Authorizatio
 
 `POST /v1/audio/transcriptions` accepts multipart form data. `file` is required. Common optional fields are `model`, `language`, `prompt` and `response_format`.
 
-`model` selects a configured ASR model; omission uses the service default. `language` can be `auto`, `en`, `ru` or another language supported by the selected engine. `prompt` supplies recognition context. `response_format` accepts `json`, `text` or `verbose_json`. The default JSON result has a `text` field. Verbose output adds available language, duration, segments, backend, model and processing-time data.
+`model` selects a configured ASR model; omission uses the service default. `language` can be `auto`, `en`, `ru` or another language supported by the selected engine. `prompt` supplies recognition context and is used for every response format, `verbose_json` included; only the shape of the answer changes, never whether the context was applied. `response_format` accepts `json`, `text` or `verbose_json`. The default JSON result has a `text` field. Verbose output adds available language, duration, segments, backend, model and processing-time data.
 
 ```sh
 curl --fail -X POST http://127.0.0.1:8080/v1/audio/transcriptions \
